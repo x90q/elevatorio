@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
@@ -8,22 +8,101 @@ const ZOOM_STEP = 0.1;
 const GRID_SIZE = 60;
 const CELL_SIZE = 64;
 
+type Point = {
+    x: number;
+    y: number;
+};
+
 function clampZoom(value: number) {
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
 
 export default function WorldViewport() {
     const [zoom, setZoom] = useState(1);
+    const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
+    const [isDragging, setIsDragging] = useState(false);
     const [hoveredCell, setHoveredCell] = useState<{ row: number; column: number } | null>(null);
+    const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
+    const zoomRef = useRef(zoom);
+    const cameraOffsetRef = useRef(cameraOffset);
 
-    function changeZoom(amount: number) {
-        setZoom((currentZoom) => clampZoom(currentZoom + amount));
+    function changeZoom(amount: number, focalPoint?: Point) {
+        const currentZoom = zoomRef.current;
+        const currentOffset = cameraOffsetRef.current;
+        const nextZoom = clampZoom(currentZoom + amount);
+
+        if (nextZoom === currentZoom) {
+            return;
+        }
+
+        let nextOffset = currentOffset;
+
+        if (focalPoint) {
+            const zoomRatio = nextZoom / currentZoom;
+            nextOffset = {
+                x: currentOffset.x + focalPoint.x * (1 - zoomRatio),
+                y: currentOffset.y + focalPoint.y * (1 - zoomRatio),
+            };
+        }
+
+        zoomRef.current = nextZoom;
+        cameraOffsetRef.current = nextOffset;
+        setZoom(nextZoom);
+        setCameraOffset(nextOffset);
     }
 
     function handleWheel(event: React.WheelEvent<HTMLElement>) {
         event.preventDefault();
         const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
-        changeZoom(direction);
+        const viewport = event.currentTarget.getBoundingClientRect();
+        const currentOffset = cameraOffsetRef.current;
+        const mapCenter = {
+            x: viewport.left + viewport.width / 2 + currentOffset.x,
+            y: viewport.top + viewport.height / 2 + currentOffset.y,
+        };
+        const focalPoint = {
+            x: event.clientX - mapCenter.x,
+            y: event.clientY - mapCenter.y,
+        };
+
+        changeZoom(direction, focalPoint);
+    }
+
+    function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+        if (event.button !== 0) {
+            return;
+        }
+
+        event.currentTarget.setPointerCapture(event.pointerId);
+        dragStart.current = {
+            x: event.clientX,
+            y: event.clientY,
+            cameraX: cameraOffsetRef.current.x,
+            cameraY: cameraOffsetRef.current.y,
+        };
+        setIsDragging(true);
+    }
+
+    function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+        if (!dragStart.current) {
+            return;
+        }
+
+        const nextOffset = {
+            x: dragStart.current.cameraX + event.clientX - dragStart.current.x,
+            y: dragStart.current.cameraY + event.clientY - dragStart.current.y,
+        };
+        cameraOffsetRef.current = nextOffset;
+        setCameraOffset(nextOffset);
+    }
+
+    function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+
+        dragStart.current = null;
+        setIsDragging(false);
     }
 
     return (
@@ -43,35 +122,48 @@ export default function WorldViewport() {
 
             <div className="absolute inset-0 overflow-hidden">
                 <div
-                    className="absolute left-1/2 top-1/2 grid border-2 border-slate-400 bg-white shadow-xl shadow-slate-300/40 transition-transform duration-200 ease-out"
+                    className="absolute left-1/2 top-1/2"
                     style={{
                         width: GRID_SIZE * CELL_SIZE,
                         height: GRID_SIZE * CELL_SIZE,
-                        gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)`,
-                        transform: `translate(-50%, -50%) scale(${zoom})`,
-                        transformOrigin: "center center",
-                        willChange: "transform",
+                        transform: `translate(-50%, -50%) translate(${cameraOffset.x}px, ${cameraOffset.y}px)`,
                     }}
                 >
-                    {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
-                        const row = Math.floor(index / GRID_SIZE);
-                        const column = index % GRID_SIZE;
-                        const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
+                    <div
+                        className={`grid bg-white shadow-xl shadow-slate-300/40 ${isDragging ? "cursor-grabbing" : "cursor-default"}`}
+                        style={{
+                            width: GRID_SIZE * CELL_SIZE,
+                            height: GRID_SIZE * CELL_SIZE,
+                            gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)`,
+                            transform: `scale(${zoom})`,
+                            transformOrigin: "center center",
+                            willChange: "transform",
+                        }}
+                        onPointerDown={handlePointerDown}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerUp}
+                    >
+                        {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
+                            const row = Math.floor(index / GRID_SIZE);
+                            const column = index % GRID_SIZE;
+                            const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
 
-                        return (
-                            <button
-                                key={`${row}-${column}`}
-                                type="button"
-                                className={`size-16 border border-slate-200 transition-colors ${isHovered
-                                    ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
-                                    : "bg-white hover:bg-emerald-100"
-                                    }`}
-                                aria-label={`Cell ${column + 1}, ${row + 1}`}
-                                onMouseEnter={() => setHoveredCell({ row, column })}
-                                onMouseLeave={() => setHoveredCell(null)}
-                            />
-                        );
-                    })}
+                            return (
+                                <button
+                                    key={`${row}-${column}`}
+                                    type="button"
+                                    className={`size-16 border border-slate-200 transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isHovered
+                                        ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
+                                        : "bg-white hover:bg-emerald-100"
+                                        }`}
+                                    aria-label={`Cell ${column + 1}, ${row + 1}`}
+                                    onMouseEnter={() => setHoveredCell({ row, column })}
+                                    onMouseLeave={() => setHoveredCell(null)}
+                                />
+                            );
+                        })}
+                    </div>
                 </div>
             </div>
 
@@ -88,7 +180,7 @@ export default function WorldViewport() {
                 <button
                     type="button"
                     className="grid size-10 place-items-center border-b border-slate-200 text-xl text-slate-700 transition hover:bg-emerald-50 hover:text-emerald-700"
-                    aria-label="Zoom out"
+                    aria-label="Zoom in"
                     onClick={() => changeZoom(ZOOM_STEP)}
                 >
                     +
@@ -99,7 +191,7 @@ export default function WorldViewport() {
                 <button
                     type="button"
                     className="grid size-10 place-items-center border-t border-slate-200 text-xl text-slate-700 transition hover:bg-emerald-50 hover:text-emerald-700"
-                    aria-label="Zoom in"
+                    aria-label="Zoom out"
                     onClick={() => changeZoom(-ZOOM_STEP)}
                 >
                     -

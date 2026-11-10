@@ -69,14 +69,14 @@ export default function Home() {
                 href="/world"
                 className="group grid grid-cols-[4rem_1fr_auto] items-center gap-4 py-5 transition hover:bg-emerald-50 sm:grid-cols-[5rem_1fr_auto]"
               >
-                <span className="font-mono text-2xl text-slate-300 transition group-hover:text-emerald-500">
+                <span className="ml-4 font-mono text-2xl text-slate-300 transition group-hover:text-emerald-500">
                   {floor.number}
                 </span>
                 <span>
                   <strong className="block text-lg font-semibold">{floor.name}</strong>
                   <small className="mt-1 block text-sm text-slate-500">{floor.status}</small>
                 </span>
-                <span className="text-slate-300 transition group-hover:translate-x-1 group-hover:text-emerald-600" aria-hidden="true">
+                <span className="mr-4 text-slate-300 transition group-hover:translate-x-1 group-hover:text-emerald-600" aria-hidden="true">
                   -&gt;
                 </span>
               </Link>
