@@ -7,10 +7,12 @@ import ProfileModal from "@/components/profile/ProfileModal";
 import ChatModal from "@/components/chat/ChatModal";
 
 export default function Navbar() {
+    // Navbar owns global overlay state so chat and profile stay available on every route.
     const [isProfileOpen, setIsProfileOpen] = useState(false);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const pathname = usePathname();
 
+    // Close route-level overlays when navigation changes.
     useEffect(() => {
         startTransition(() => {
             setIsProfileOpen(false);
@@ -18,6 +20,7 @@ export default function Navbar() {
         });
     }, [pathname]);
 
+    // Escape is the shared keyboard shortcut for closing active overlays.
     useEffect(() => {
         function handleKeyDown(event: KeyboardEvent) {
             if (event.key === "Escape") {
@@ -33,6 +36,7 @@ export default function Navbar() {
         };
     }, []);
 
+    // Navigation actions are intentionally kept separate from modal content.
     return (
         <>
             <header className="fixed left-0 right-0 top-0 z-30 border-b border-slate-200 bg-white text-slate-900">

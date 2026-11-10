@@ -13,6 +13,7 @@ type ProfileForm = {
 };
 
 export default function ProfileModal({ onClose }: ProfileModalProps) {
+    // Local draft and saved profile states allow edit/cancel without a backend yet.
     const [isEditing, setIsEditing] = useState(false);
     const [savedProfile, setSavedProfile] = useState<ProfileForm>({
         displayName: "User Name",
@@ -25,6 +26,7 @@ export default function ProfileModal({ onClose }: ProfileModalProps) {
         bio: "A new member of the Elevator Office.",
     });
 
+    // Keep all form updates type-safe and reusable across profile fields.
     function updateProfileField(field: keyof ProfileForm, value: string) {
         setProfileForm((currentProfile) => ({
             ...currentProfile,
@@ -32,6 +34,7 @@ export default function ProfileModal({ onClose }: ProfileModalProps) {
         }));
     }
 
+    // The overlay closes from the backdrop while the dialog stops event propagation.
     return (
         <div
             className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-xs"

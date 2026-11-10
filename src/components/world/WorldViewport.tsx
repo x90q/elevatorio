@@ -1,6 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
+import Image from "next/image";
+import { useEffect, useRef, useState } from "react";
+import { MapData, MapObject } from "@/lib/map-types";
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
@@ -8,17 +10,6 @@ const ZOOM_STEP = 0.1;
 const GRID_SIZE = 60;
 const CELL_SIZE = 64;
 const DRAG_THRESHOLD = 4;
-const BLOCKED_CELLS = new Set([
-    "28:28",
-    "28:29",
-    "28:30",
-    "28:31",
-    "28:32",
-    "29:28",
-    "30:28",
-    "31:28",
-    "32:28",
-]);
 
 type Point = {
     x: number;
@@ -30,17 +21,20 @@ type CellPosition = {
     column: number;
 };
 
-function isFree(position: CellPosition) {
+// The public world uses the same camera and grid dimensions as the editor.
+// A cell is walkable only when it is inside the grid and has no collision.
+function isFree(position: CellPosition, blockedCells: Set<string>) {
     return (
         position.row >= 0 &&
         position.row < GRID_SIZE &&
         position.column >= 0 &&
         position.column < GRID_SIZE &&
-        !BLOCKED_CELLS.has(`${position.row}:${position.column}`)
+        !blockedCells.has(`${position.row}:${position.column}`)
     );
 }
 
-function findPath(start: CellPosition, target: CellPosition) {
+// Find the shortest walkable route using the current map collision state.
+function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<string>) {
     const directions = [
         { row: -1, column: 0 },
         { row: 0, column: 1 },
@@ -86,7 +80,7 @@ function findPath(start: CellPosition, target: CellPosition) {
             };
             const nextKey = `${next.row}:${next.column}`;
 
-            if (isFree(next) && !visited.has(nextKey)) {
+            if (isFree(next, blockedCells) && !visited.has(nextKey)) {
                 visited.add(nextKey);
                 previous.set(nextKey, current);
                 queue.push(next);
@@ -102,6 +96,9 @@ function clampZoom(value: number) {
 }
 
 export default function WorldViewport() {
+    // Store the saved collision cells and objects received from the admin editor.
+    const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
+    const [placedObjects, setPlacedObjects] = useState<Record<string, MapObject>>({});
     const [zoom, setZoom] = useState(1);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
@@ -112,16 +109,38 @@ export default function WorldViewport() {
     const cameraOffsetRef = useRef(cameraOffset);
     const isMoving = useRef(false);
 
+    // Load the same floor map that the admin editor saves in PostgreSQL.
+    useEffect(() => {
+        async function loadMap() {
+            try {
+                const response = await fetch("/api/map?floorId=lobby");
+
+                if (!response.ok) {
+                    throw new Error("Map loading failed");
+                }
+
+                const mapData: MapData = await response.json();
+                setBlockedCells(new Set(mapData.blockedCells));
+                setPlacedObjects(mapData.placedObjects);
+            } catch (error) {
+                console.error("Failed to load public world map", error);
+            }
+        }
+
+        loadMap();
+    }, []);
+
+    // Move the player only when BFS can find a route through free cells.
     async function movePlayer(target: CellPosition) {
         if (
-            !isFree(target) ||
+            !isFree(target, blockedCells) ||
             isMoving.current ||
             (target.row === playerPosition.row && target.column === playerPosition.column)
         ) {
             return;
         }
 
-        const path = findPath(playerPosition, target);
+        const path = findPath(playerPosition, target, blockedCells);
 
         if (path.length === 0) {
             return;
@@ -137,6 +156,7 @@ export default function WorldViewport() {
         isMoving.current = false;
     }
 
+    // Update zoom and camera position while preserving the cursor focal point.
     function changeZoom(amount: number, focalPoint?: Point) {
         const currentZoom = zoomRef.current;
         const currentOffset = cameraOffsetRef.current;
@@ -162,6 +182,7 @@ export default function WorldViewport() {
         setCameraOffset(nextOffset);
     }
 
+    // Use the wheel for zooming instead of allowing the page to scroll.
     function handleWheel(event: React.WheelEvent<HTMLElement>) {
         event.preventDefault();
         const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
@@ -179,6 +200,7 @@ export default function WorldViewport() {
         changeZoom(direction, focalPoint);
     }
 
+    // Start tracking a possible camera drag.
     function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
         if (event.button !== 0) {
             return;
@@ -193,6 +215,7 @@ export default function WorldViewport() {
         setIsDragging(false);
     }
 
+    // Move the camera only after the pointer passes the drag threshold.
     function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
         if (!dragStart.current) {
             return;
@@ -218,6 +241,7 @@ export default function WorldViewport() {
         setCameraOffset(nextOffset);
     }
 
+    // Finish the drag and release pointer capture.
     function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
@@ -232,7 +256,8 @@ export default function WorldViewport() {
             className="relative min-h-0 flex-1 overscroll-none overflow-hidden bg-[#eef1ec]"
             onWheel={handleWheel}
         >
-            <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(15,23,42,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.08)_1px,transparent_1px)] bg-[size:64px_64px]" />
+            {/* Decorative background grid behind the interactive world map. */}
+            <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(15,23,42,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.08)_1px,transparent_1px)] bg-size-[64px_64px]" />
 
             <div className="absolute left-4 top-4 z-10 flex flex-col gap-1 rounded-lg border border-slate-200 bg-white/95 px-6 py-4 shadow-lg shadow-slate-300/30 backdrop-blur-sm">
                 <p className="text-xs font-bold uppercase tracking-[0.3em] text-emerald-600">
@@ -266,18 +291,20 @@ export default function WorldViewport() {
                         onPointerUp={handlePointerUp}
                         onPointerCancel={handlePointerUp}
                     >
+                        {/* Render each saved object inside the cell where it was placed. */}
                         {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
                             const row = Math.floor(index / GRID_SIZE);
                             const column = index % GRID_SIZE;
                             const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
                             const isPlayer = playerPosition.row === row && playerPosition.column === column;
-                            const isFreeCell = isFree({ row, column });
+                            const isFreeCell = isFree({ row, column }, blockedCells);
+                            const object = placedObjects[`${row}:${column}`];
 
                             return (
                                 <button
                                     key={`${row}-${column}`}
                                     type="button"
-                                    className={`size-16 border transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${isPlayer
+                                    className={`relative size-16 transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${isPlayer
                                         ? "z-20 bg-emerald-100 ring-2 ring-emerald-600"
                                         : !isFreeCell
                                             ? "bg-white"
@@ -290,7 +317,18 @@ export default function WorldViewport() {
                                     onMouseEnter={() => setHoveredCell({ row, column })}
                                     onMouseLeave={() => setHoveredCell(null)}
                                     onDoubleClick={() => movePlayer({ row, column })}
-                                />
+                                >
+                                    {object && (
+                                        <Image
+                                            src={object.src}
+                                            alt={object.name}
+                                            width={64}
+                                            height={64}
+                                            unoptimized
+                                            className="pointer-events-none absolute inset-0 size-full object-contain"
+                                        />
+                                    )}
+                                </button>
                             );
                         })}
 
@@ -308,6 +346,7 @@ export default function WorldViewport() {
                 </div>
             </div>
 
+            {/* Show the coordinates and walkability state under the cursor. */}
             <div className="absolute right-4 top-4 z-10 rounded-lg border border-slate-200 bg-white/95 px-4 py-3 text-right shadow-lg shadow-slate-300/30 backdrop-blur-sm">
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Cursor position</p>
                 <p className="mt-1 font-mono text-sm font-semibold text-slate-700">
@@ -317,6 +356,7 @@ export default function WorldViewport() {
                 </p>
             </div>
 
+            {/* Explicit zoom controls for users who do not use the mouse wheel. */}
             <div className="absolute bottom-6 right-6 z-10 flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg shadow-slate-300/30">
                 <button
                     type="button"
@@ -341,8 +381,8 @@ export default function WorldViewport() {
 
             <div className="absolute bottom-6 left-6 z-10 rounded-lg border border-slate-200 bg-white/95 px-4 py-3 text-right shadow-lg shadow-slate-300/30 backdrop-blur-sm">
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Map status</p>
-                <p className={`mt-1 text-sm font-semibold ${hoveredCell && !isFree(hoveredCell) ? "text-red-600" : "text-emerald-700"}`}>
-                    {hoveredCell && !isFree(hoveredCell) ? "Blocked cell" : "Ready to explore"}
+                <p className={`mt-1 text-sm font-semibold ${hoveredCell && !isFree(hoveredCell, blockedCells) ? "text-red-600" : "text-emerald-700"}`}>
+                    {hoveredCell && !isFree(hoveredCell, blockedCells) ? "Blocked cell" : "Ready to explore"}
                 </p>
             </div>
         </section>

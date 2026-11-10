@@ -24,6 +24,7 @@ type Message = {
     time: string;
 };
 
+// Temporary conversation fixtures; replace these with API or realtime subscriptions later.
 const conversations: Conversation[] = [
     {
         id: "lobby",
@@ -51,6 +52,7 @@ const conversations: Conversation[] = [
     },
 ];
 
+// Local seed messages keep the chat interaction testable before persistence is added.
 const initialMessages: Message[] = [
     {
         id: 1,
@@ -86,6 +88,7 @@ const initialMessages: Message[] = [
     },
 ];
 
+// Derive compact avatars from participant names when no image is available.
 function getInitials(name: string) {
     return name
         .split(" ")
@@ -96,12 +99,14 @@ function getInitials(name: string) {
 }
 
 export default function ChatModal({ onClose }: ChatModalProps) {
+    // Chat state controls the selected tab, conversation, draft, and local message history.
     const [activeConversation, setActiveConversation] = useState("");
     const [activeChatType, setActiveChatType] = useState<ChatType>("DM");
     const [messages, setMessages] = useState(initialMessages);
     const [draft, setDraft] = useState("");
     const activeChat = conversations.find((conversation) => conversation.id === activeConversation);
 
+    // Append a local message now; this is the seam for a future chat API or websocket.
     function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         const text = draft.trim();
@@ -124,6 +129,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
         setDraft("");
     }
 
+    // Switching chat scopes selects the first matching conversation when one exists.
     function handleChatTypeChange(chatType: ChatType) {
         setActiveChatType(chatType);
         if (chatType === "DM") {
@@ -135,8 +141,10 @@ export default function ChatModal({ onClose }: ChatModalProps) {
         setActiveConversation(nextConversation?.id ?? "");
     }
 
+    // Only messages belonging to the active conversation are rendered.
     const activeMessages = messages.filter((message) => message.conversationId === activeConversation);
 
+    // The modal separates navigation, conversation content, and message composition.
     return (
         <section
             className="fixed bottom-2 left-2 top-18 z-20 flex w-full max-w-md flex-col overflow-hidden border border-slate-300 bg-white text-slate-900 shadow-2xl rounded-xl"

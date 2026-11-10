@@ -4,14 +4,15 @@ import { ChangeEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { MapData, MapObject } from "@/lib/map-types";
 
+// Shared editor limits keep the grid and camera behavior predictable.
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
 const GRID_SIZE = 60;
-const CELL_SIZE = 48;
+const CELL_SIZE = 64;
 const DRAG_THRESHOLD = 4;
 
-type EditorTool = "wall" | "object" | "erase";
+type EditorTool = "collision" | "object" | "erase";
 
 type PlacedObject = MapObject;
 
@@ -20,17 +21,19 @@ type Point = {
     y: number;
 };
 
+// Use a stable string key so cells can be stored in Sets and JSON objects.
 function cellKey(row: number, column: number) {
     return `${row}:${column}`;
 }
 
+// Keep zoom controls inside the supported viewport range.
 function clampZoom(value: number) {
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
 
 export default function WorldEditor() {
     // React state contains the editable map and the current viewport controls.
-    const [tool, setTool] = useState<EditorTool>("wall");
+    const [tool, setTool] = useState<EditorTool>("collision");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
     const [selectedAsset, setSelectedAsset] = useState<PlacedObject | null>(null);
@@ -55,7 +58,7 @@ export default function WorldEditor() {
                 }
 
                 const mapData: MapData = await response.json();
-                setBlockedCells(new Set(mapData.blockedCells));
+                setBlockedCells(new Set([...mapData.blockedCells, ...Object.keys(mapData.placedObjects)]));
                 setPlacedObjects(mapData.placedObjects);
                 setSaveState("idle");
             } catch {
@@ -217,7 +220,7 @@ export default function WorldEditor() {
 
         const key = cellKey(row, column);
 
-        if (tool === "wall") {
+        if (tool === "collision") {
             setBlockedCells((currentCells) => {
                 const nextCells = new Set(currentCells);
 
@@ -237,6 +240,7 @@ export default function WorldEditor() {
                 ...currentObjects,
                 [key]: selectedAsset,
             }));
+            setBlockedCells((currentCells) => new Set(currentCells).add(key));
             return;
         }
 
@@ -254,6 +258,7 @@ export default function WorldEditor() {
         }
     }
 
+    // The main viewport contains the editable map and its camera controls.
     return (
         <main className="min-h-dvh bg-[#eef1ec] pt-16 text-slate-950">
             <div className="mx-auto flex min-h-[calc(100dvh-4rem)] max-w-[1600px] flex-col gap-4 p-4 lg:flex-row">
@@ -316,6 +321,7 @@ export default function WorldEditor() {
                                     onPointerUp={handlePointerUp}
                                     onPointerCancel={handlePointerUp}
                                 >
+                                    {/* Each button represents one editable map cell. */}
                                     {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
                                         const row = Math.floor(index / GRID_SIZE);
                                         const column = index % GRID_SIZE;
@@ -327,7 +333,7 @@ export default function WorldEditor() {
                                             <button
                                                 key={key}
                                                 type="button"
-                                                className={`relative size-12 border text-left transition-colors ${isBlocked ? "border-red-400 bg-red-50/20" : "border-slate-200 hover:bg-emerald-50"}`}
+                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isBlocked ? "border-red-400 bg-red-50/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
                                                 aria-label={`Edit cell ${column + 1}, ${row + 1}`}
                                                 onMouseEnter={() => setHoveredCell({ row, column })}
                                                 onMouseLeave={() => setHoveredCell(null)}
@@ -337,10 +343,10 @@ export default function WorldEditor() {
                                                     <Image
                                                         src={object.src}
                                                         alt={object.name}
-                                                        width={40}
-                                                        height={40}
+                                                        width={64}
+                                                        height={64}
                                                         unoptimized
-                                                        className="pointer-events-none absolute inset-1 size-10 object-contain"
+                                                        className="pointer-events-none absolute inset-0 size-full object-contain"
                                                     />
                                                 )}
                                             </button>
@@ -374,9 +380,10 @@ export default function WorldEditor() {
                 </section>
 
                 <aside className="w-full shrink-0 rounded-xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/30 lg:w-72">
+                    {/* The sidebar contains editing tools, asset upload, and save status. */}
                     <p className="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Tools</p>
                     <div className="mt-3 grid grid-cols-3 gap-2">
-                        {(["wall", "object", "erase"] as EditorTool[]).map((editorTool) => (
+                        {(["collision", "object", "erase"] as EditorTool[]).map((editorTool) => (
                             <button
                                 key={editorTool}
                                 type="button"
