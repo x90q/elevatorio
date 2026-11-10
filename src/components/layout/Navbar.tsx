@@ -56,6 +56,10 @@ export default function Navbar() {
                             Enter the building
                         </Link>
 
+                        <Link className="transition hover:text-emerald-600" href="/admin">
+                            Admin
+                        </Link>
+
                         <button
                             type="button"
                             className="transition hover:text-emerald-600"

@@ -341,7 +341,9 @@ export default function WorldViewport() {
 
             <div className="absolute bottom-6 left-6 z-10 rounded-lg border border-slate-200 bg-white/95 px-4 py-3 text-right shadow-lg shadow-slate-300/30 backdrop-blur-sm">
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Map status</p>
-                <p className="mt-1 text-sm font-semibold text-emerald-700">Ready to explore</p>
+                <p className={`mt-1 text-sm font-semibold ${hoveredCell && !isFree(hoveredCell) ? "text-red-600" : "text-emerald-700"}`}>
+                    {hoveredCell && !isFree(hoveredCell) ? "Blocked cell" : "Ready to explore"}
+                </p>
             </div>
         </section>
     );
