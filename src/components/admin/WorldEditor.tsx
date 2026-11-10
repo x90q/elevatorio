@@ -1,7 +1,8 @@
 "use client";
 
-import { ChangeEvent, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
+import { MapData, MapObject } from "@/lib/map-types";
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
@@ -12,11 +13,7 @@ const DRAG_THRESHOLD = 4;
 
 type EditorTool = "wall" | "object" | "erase";
 
-type PlacedObject = {
-    id: string;
-    src: string;
-    name: string;
-};
+type PlacedObject = MapObject;
 
 type Point = {
     x: number;
@@ -32,6 +29,7 @@ function clampZoom(value: number) {
 }
 
 export default function WorldEditor() {
+    // React state contains the editable map and the current viewport controls.
     const [tool, setTool] = useState<EditorTool>("wall");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
@@ -40,11 +38,61 @@ export default function WorldEditor() {
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
     const [hoveredCell, setHoveredCell] = useState<{ row: number; column: number } | null>(null);
+    const [saveState, setSaveState] = useState<"idle" | "loading" | "saving" | "saved" | "error">("loading");
     const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
     const zoomRef = useRef(zoom);
     const cameraOffsetRef = useRef(cameraOffset);
     const suppressClick = useRef(false);
 
+    // Load the saved floor map once when the admin editor is opened.
+    useEffect(() => {
+        async function loadMap() {
+            try {
+                const response = await fetch("/api/map?floorId=lobby");
+
+                if (!response.ok) {
+                    throw new Error("Map loading failed");
+                }
+
+                const mapData: MapData = await response.json();
+                setBlockedCells(new Set(mapData.blockedCells));
+                setPlacedObjects(mapData.placedObjects);
+                setSaveState("idle");
+            } catch {
+                setSaveState("error");
+            }
+        }
+
+        loadMap();
+    }, []);
+
+    // Send the current editor state to the API as JSON.
+    async function saveMap() {
+        setSaveState("saving");
+
+        const mapData: MapData = {
+            blockedCells: Array.from(blockedCells),
+            placedObjects,
+        };
+
+        try {
+            const response = await fetch("/api/map?floorId=lobby", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(mapData),
+            });
+
+            if (!response.ok) {
+                throw new Error("Map saving failed");
+            }
+
+            setSaveState("saved");
+        } catch {
+            setSaveState("error");
+        }
+    }
+
+    // Change zoom and keep the point under the cursor in the same visual position.
     function changeZoom(amount: number, focalPoint?: Point) {
         const currentZoom = zoomRef.current;
         const currentOffset = cameraOffsetRef.current;
@@ -70,6 +118,7 @@ export default function WorldEditor() {
         setCameraOffset(nextOffset);
     }
 
+    // Convert mouse-wheel movement into zoom and prevent page scrolling inside the viewport.
     function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
         event.preventDefault();
         const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
@@ -82,6 +131,7 @@ export default function WorldEditor() {
         changeZoom(direction, focalPoint);
     }
 
+    // Remember where a possible drag starts.
     function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
         if (event.button !== 0) {
             return;
@@ -97,6 +147,7 @@ export default function WorldEditor() {
         setIsDragging(false);
     }
 
+    // Move the camera after the pointer has crossed the drag threshold.
     function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
         if (!dragStart.current) {
             return;
@@ -123,6 +174,7 @@ export default function WorldEditor() {
         setCameraOffset(nextOffset);
     }
 
+    // Release pointer capture and finish the camera drag.
     function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
@@ -132,6 +184,7 @@ export default function WorldEditor() {
         setIsDragging(false);
     }
 
+    // Read an uploaded image as a data URL so it can be previewed and saved with the map.
     function handleAssetUpload(event: ChangeEvent<HTMLInputElement>) {
         const file = event.target.files?.[0];
 
@@ -155,6 +208,7 @@ export default function WorldEditor() {
         reader.readAsDataURL(file);
     }
 
+    // Apply the selected editor tool to one grid cell.
     function handleCellClick(row: number, column: number) {
         if (suppressClick.current) {
             suppressClick.current = false;
@@ -212,6 +266,14 @@ export default function WorldEditor() {
                         <div className="flex items-center gap-2 text-xs text-slate-500">
                             <span>{blockedCells.size} walls</span>
                             <span>{Object.keys(placedObjects).length} objects</span>
+                            <button
+                                type="button"
+                                className="rounded-lg bg-emerald-600 px-3 py-2 font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={saveState === "loading" || saveState === "saving"}
+                                onClick={saveMap}
+                            >
+                                {saveState === "saving" ? "Saving..." : "Save map"}
+                            </button>
                         </div>
                     </header>
 
@@ -352,6 +414,13 @@ export default function WorldEditor() {
                         ) : (
                             <p>Upload an image, choose Object, then click a cell.</p>
                         )}
+                        <p className={`mt-3 text-xs ${saveState === "error" ? "text-red-600" : saveState === "saved" ? "text-emerald-600" : "text-slate-400"}`}>
+                            {saveState === "loading" && "Loading saved map..."}
+                            {saveState === "idle" && "Unsaved changes are stored locally until you save."}
+                            {saveState === "saving" && "Saving map..."}
+                            {saveState === "saved" && "Map saved successfully."}
+                            {saveState === "error" && "Could not connect to the map database."}
+                        </p>
                     </div>
                 </aside>
             </div>
