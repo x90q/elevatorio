@@ -8,6 +8,17 @@ const ZOOM_STEP = 0.1;
 const GRID_SIZE = 60;
 const CELL_SIZE = 64;
 const DRAG_THRESHOLD = 4;
+const BLOCKED_CELLS = new Set([
+    "28:28",
+    "28:29",
+    "28:30",
+    "28:31",
+    "28:32",
+    "29:28",
+    "30:28",
+    "31:28",
+    "32:28",
+]);
 
 type Point = {
     x: number;
@@ -24,7 +35,8 @@ function isFree(position: CellPosition) {
         position.row >= 0 &&
         position.row < GRID_SIZE &&
         position.column >= 0 &&
-        position.column < GRID_SIZE
+        position.column < GRID_SIZE &&
+        !BLOCKED_CELLS.has(`${position.row}:${position.column}`)
     );
 }
 
@@ -101,7 +113,11 @@ export default function WorldViewport() {
     const isMoving = useRef(false);
 
     async function movePlayer(target: CellPosition) {
-        if (isMoving.current || (target.row === playerPosition.row && target.column === playerPosition.column)) {
+        if (
+            !isFree(target) ||
+            isMoving.current ||
+            (target.row === playerPosition.row && target.column === playerPosition.column)
+        ) {
             return;
         }
 
@@ -255,18 +271,22 @@ export default function WorldViewport() {
                             const column = index % GRID_SIZE;
                             const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
                             const isPlayer = playerPosition.row === row && playerPosition.column === column;
+                            const isFreeCell = isFree({ row, column });
 
                             return (
                                 <button
                                     key={`${row}-${column}`}
                                     type="button"
-                                    className={`size-16 border border-slate-200 transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isPlayer
+                                    className={`size-16 border transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${isPlayer
                                         ? "z-20 bg-emerald-100 ring-2 ring-emerald-600"
-                                        : isHovered
-                                            ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
-                                            : "bg-white hover:bg-emerald-100"
+                                        : !isFreeCell
+                                            ? "bg-white"
+                                            : isHovered
+                                                ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
+                                                : "bg-white hover:bg-emerald-100"
                                         }`}
                                     aria-label={`Cell ${column + 1}, ${row + 1}`}
+                                    title={isFreeCell ? undefined : "Blocked cell"}
                                     onMouseEnter={() => setHoveredCell({ row, column })}
                                     onMouseLeave={() => setHoveredCell(null)}
                                     onDoubleClick={() => movePlayer({ row, column })}
