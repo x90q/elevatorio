@@ -4,14 +4,17 @@ import { startTransition, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import ProfileModal from "@/components/profile/ProfileModal";
+import ChatModal from "@/components/chat/ChatModal";
 
 export default function Navbar() {
     const [isProfileOpen, setIsProfileOpen] = useState(false);
+    const [isChatOpen, setIsChatOpen] = useState(false);
     const pathname = usePathname();
 
     useEffect(() => {
         startTransition(() => {
             setIsProfileOpen(false);
+            setIsChatOpen(false);
         });
     }, [pathname]);
 
@@ -19,6 +22,7 @@ export default function Navbar() {
         function handleKeyDown(event: KeyboardEvent) {
             if (event.key === "Escape") {
                 setIsProfileOpen(false);
+                setIsChatOpen(false);
             }
         }
 
@@ -31,7 +35,7 @@ export default function Navbar() {
 
     return (
         <>
-            <header className="relative z-30 border-b border-slate-200 bg-white text-slate-900">
+            <header className="fixed left-0 right-0 top-0 z-30 border-b border-slate-200 bg-white text-slate-900">
                 <nav className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between px-6">
                     <Link
                         href="/"
@@ -55,7 +59,23 @@ export default function Navbar() {
                         <button
                             type="button"
                             className="transition hover:text-emerald-600"
-                            onClick={() => setIsProfileOpen(true)}
+                            onClick={() => {
+                                setIsChatOpen(true);
+                                setIsProfileOpen(false);
+                            }
+                            }
+                        >
+                            Chat
+                        </button>
+
+                        <button
+                            type="button"
+                            className="transition hover:text-emerald-600"
+                            onClick={() => {
+                                setIsProfileOpen(true);
+                                setIsChatOpen(false);
+                            }
+                            }
                         >
                             Profile
                         </button>
@@ -65,6 +85,9 @@ export default function Navbar() {
 
             {isProfileOpen && (
                 <ProfileModal onClose={() => setIsProfileOpen(false)} />
+            )}
+            {isChatOpen && (
+                <ChatModal onClose={() => setIsChatOpen(false)} />
             )}
         </>
     );

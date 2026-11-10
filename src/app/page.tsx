@@ -11,17 +11,17 @@ const floors = [
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-[#f7f8f5] text-slate-950">
+    <div className="min-h-screen bg-emerald-100/10 pt-16 text-slate-950">
       <Navbar />
 
-      <main className="mx-auto grid min-h-[calc(100dvh-4rem)] w-full max-w-[1440px] grid-cols-1 border-x border-slate-200 lg:grid-cols-[1.05fr_0.95fr]">
+      <main className="mx-auto grid min-h-[calc(100dvh-4rem)] w-full max-w-360 grid-cols-1 border-x border-slate-200 lg:grid-cols-[1.05fr_0.95fr]">
         <section className="relative flex flex-col justify-between overflow-hidden border-b border-slate-200 px-6 py-10 sm:px-12 lg:border-b-0 lg:border-r lg:px-16 lg:py-14">
-          <div className="pointer-events-none absolute -right-32 -top-32 size-96 rounded-full border-[40px] border-emerald-100/70" />
+          <div className="pointer-events-none absolute -right-32 -top-32 size-96 rounded-full border-40 border-emerald-200/50" />
           <div className="pointer-events-none absolute bottom-0 left-0 h-1/2 w-full bg-[linear-gradient(to_right,rgba(15,23,42,0.04)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.04)_1px,transparent_1px)] bg-[size:32px_32px]" />
 
           <div className="relative z-10">
-            <div className="flex items-center gap-3 text-xs font-bold uppercase tracking-[0.3em] text-emerald-700">
-              <span className="size-2 rounded-full bg-emerald-500" />
+            <div className="flex items-center gap-3 text-xs font-bold uppercase tracking-[0.3em] text-emerald-600">
+              <span className="size-2 rounded-full bg-emerald-600" />
               Elevator.
             </div>
 
