@@ -7,11 +7,83 @@ const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
 const GRID_SIZE = 60;
 const CELL_SIZE = 64;
+const DRAG_THRESHOLD = 4;
 
 type Point = {
     x: number;
     y: number;
 };
+
+type CellPosition = {
+    row: number;
+    column: number;
+};
+
+function isFree(position: CellPosition) {
+    return (
+        position.row >= 0 &&
+        position.row < GRID_SIZE &&
+        position.column >= 0 &&
+        position.column < GRID_SIZE
+    );
+}
+
+function findPath(start: CellPosition, target: CellPosition) {
+    const directions = [
+        { row: -1, column: 0 },
+        { row: 0, column: 1 },
+        { row: 1, column: 0 },
+        { row: 0, column: -1 },
+    ];
+
+    // bfs algorithm search
+
+    const queue = [start];
+    const visited = new Set([`${start.row}:${start.column}`]);
+    const previous = new Map<string, CellPosition>();
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+
+        if (!current) {
+            break;
+        }
+
+        if (current.row === target.row && current.column === target.column) {
+            const path = [current];
+            let key = `${current.row}:${current.column}`;
+
+            while (previous.has(key)) {
+                const previousCell = previous.get(key);
+
+                if (!previousCell) {
+                    break;
+                }
+
+                path.unshift(previousCell);
+                key = `${previousCell.row}:${previousCell.column}`;
+            }
+
+            return path;
+        }
+
+        for (const direction of directions) {
+            const next = {
+                row: current.row + direction.row,
+                column: current.column + direction.column,
+            };
+            const nextKey = `${next.row}:${next.column}`;
+
+            if (isFree(next) && !visited.has(nextKey)) {
+                visited.add(nextKey);
+                previous.set(nextKey, current);
+                queue.push(next);
+            }
+        }
+    }
+
+    return [];
+}
 
 function clampZoom(value: number) {
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
@@ -21,10 +93,33 @@ export default function WorldViewport() {
     const [zoom, setZoom] = useState(1);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
-    const [hoveredCell, setHoveredCell] = useState<{ row: number; column: number } | null>(null);
+    const [hoveredCell, setHoveredCell] = useState<CellPosition | null>(null);
+    const [playerPosition, setPlayerPosition] = useState<CellPosition>({ row: 30, column: 30 });
     const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
     const zoomRef = useRef(zoom);
     const cameraOffsetRef = useRef(cameraOffset);
+    const isMoving = useRef(false);
+
+    async function movePlayer(target: CellPosition) {
+        if (isMoving.current || (target.row === playerPosition.row && target.column === playerPosition.column)) {
+            return;
+        }
+
+        const path = findPath(playerPosition, target);
+
+        if (path.length === 0) {
+            return;
+        }
+
+        isMoving.current = true;
+
+        for (const nextPosition of path.slice(1)) {
+            setPlayerPosition(nextPosition);
+            await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+
+        isMoving.current = false;
+    }
 
     function changeZoom(amount: number, focalPoint?: Point) {
         const currentZoom = zoomRef.current;
@@ -73,14 +168,13 @@ export default function WorldViewport() {
             return;
         }
 
-        event.currentTarget.setPointerCapture(event.pointerId);
         dragStart.current = {
             x: event.clientX,
             y: event.clientY,
             cameraX: cameraOffsetRef.current.x,
             cameraY: cameraOffsetRef.current.y,
         };
-        setIsDragging(true);
+        setIsDragging(false);
     }
 
     function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
@@ -88,9 +182,21 @@ export default function WorldViewport() {
             return;
         }
 
+        const distanceX = event.clientX - dragStart.current.x;
+        const distanceY = event.clientY - dragStart.current.y;
+
+        if (!isDragging && Math.hypot(distanceX, distanceY) < DRAG_THRESHOLD) {
+            return;
+        }
+
+        if (!isDragging) {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setIsDragging(true);
+        }
+
         const nextOffset = {
-            x: dragStart.current.cameraX + event.clientX - dragStart.current.x,
-            y: dragStart.current.cameraY + event.clientY - dragStart.current.y,
+            x: dragStart.current.cameraX + distanceX,
+            y: dragStart.current.cameraY + distanceY,
         };
         cameraOffsetRef.current = nextOffset;
         setCameraOffset(nextOffset);
@@ -130,7 +236,7 @@ export default function WorldViewport() {
                     }}
                 >
                     <div
-                        className={`grid bg-white shadow-xl shadow-slate-300/40 ${isDragging ? "cursor-grabbing" : "cursor-default"}`}
+                        className={`relative grid bg-white shadow-xl shadow-slate-300/40 ${isDragging ? "cursor-grabbing" : "cursor-default"}`}
                         style={{
                             width: GRID_SIZE * CELL_SIZE,
                             height: GRID_SIZE * CELL_SIZE,
@@ -148,21 +254,36 @@ export default function WorldViewport() {
                             const row = Math.floor(index / GRID_SIZE);
                             const column = index % GRID_SIZE;
                             const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
+                            const isPlayer = playerPosition.row === row && playerPosition.column === column;
 
                             return (
                                 <button
                                     key={`${row}-${column}`}
                                     type="button"
-                                    className={`size-16 border border-slate-200 transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isHovered
-                                        ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
-                                        : "bg-white hover:bg-emerald-100"
+                                    className={`size-16 border border-slate-200 transition-colors ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isPlayer
+                                        ? "z-20 bg-emerald-100 ring-2 ring-emerald-600"
+                                        : isHovered
+                                            ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
+                                            : "bg-white hover:bg-emerald-100"
                                         }`}
                                     aria-label={`Cell ${column + 1}, ${row + 1}`}
                                     onMouseEnter={() => setHoveredCell({ row, column })}
                                     onMouseLeave={() => setHoveredCell(null)}
+                                    onDoubleClick={() => movePlayer({ row, column })}
                                 />
                             );
                         })}
+
+                        <span
+                            className="pointer-events-none absolute z-30 grid size-8 place-items-center rounded-full bg-emerald-600 text-xs font-bold text-white shadow-md transition-[left,top] duration-100 ease-linear"
+                            style={{
+                                left: playerPosition.column * CELL_SIZE + CELL_SIZE / 2 - 16,
+                                top: playerPosition.row * CELL_SIZE + CELL_SIZE / 2 - 16,
+                            }}
+                            aria-hidden="true"
+                        >
+                            You
+                        </span>
                     </div>
                 </div>
             </div>
