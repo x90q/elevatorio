@@ -324,7 +324,7 @@ export default function WorldEditor() {
                         <div className="flex items-center gap-2 text-xs text-slate-500">
                             <span>{blockedCells.size} walls</span>
                             <span>{Object.keys(placedObjects).length} objects</span>
-                            <span>{Object.keys(rooms).length} room's cells</span>
+                            <span>{Object.keys(rooms).length} room cells</span>
                             <button
                                 type="button"
                                 className="rounded-lg bg-emerald-600 px-3 py-2 font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
@@ -350,6 +350,11 @@ export default function WorldEditor() {
                                     ? `X ${hoveredCell.column + 1} / Y ${hoveredCell.row + 1}`
                                     : "Move over a cell"}
                             </p>
+                            {hoveredCell && (
+                                <p className={`mt-1 text-sm font-semibold ${blockedCells.has(cellKey(hoveredCell.row, hoveredCell.column)) ? "text-red-600" : "text-emerald-600"}`}>
+                                    Collision: {blockedCells.has(cellKey(hoveredCell.row, hoveredCell.column)) ? "Yes" : "No"}
+                                </p>
+                            )}
                             {hoveredCell && rooms[cellKey(hoveredCell.row, hoveredCell.column)] && (
                                 <p className="mt-1 max-w-48 truncate text-sm font-semibold text-blue-700">
                                     Room: {rooms[cellKey(hoveredCell.row, hoveredCell.column)].name}
@@ -397,7 +402,7 @@ export default function WorldEditor() {
                                             <button
                                                 key={key}
                                                 type="button"
-                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${room ? "border-blue-400 bg-blue-50/20 z-10 ring-2 ring-blue-500" : isBlocked ? "border-red-400 bg-red-50/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
+                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${room ? `${isBlocked ? "bg-red-400/20" : "bg-blue-50/20"} border-blue-400 z-10 ring-2 ring-blue-500` : isBlocked ? "border-red-400 bg-red-400/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
                                                 aria-label={`Edit cell ${column + 1}, ${row + 1}`}
                                                 onMouseEnter={() => setHoveredCell({ row, column })}
                                                 onMouseLeave={() => setHoveredCell(null)}
