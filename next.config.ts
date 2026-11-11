@@ -5,7 +5,6 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   // Allow a phone on the local network to load Next.js development resources.
-  allowedDevOrigins: ["192.168.0.29"],
   turbopack: {
     rules: {
       "*.css": {
