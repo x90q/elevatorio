@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
+import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject } from "@/lib/map-types";
 
 // Shared editor limits keep the grid and camera behavior predictable.
@@ -33,6 +34,7 @@ function clampZoom(value: number) {
 
 export default function WorldEditor() {
     // React state contains the editable map and the current viewport controls.
+    const [floorId, setFloorId] = useState<FloorId>("lobby");
     const [tool, setTool] = useState<EditorTool>("collision");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
@@ -47,18 +49,20 @@ export default function WorldEditor() {
     const cameraOffsetRef = useRef(cameraOffset);
     const suppressClick = useRef(false);
 
-    // Load the saved floor map once when the admin editor is opened.
+    // Load the selected floor map whenever the admin changes floors.
     useEffect(() => {
         async function loadMap() {
+            setSaveState("loading");
+
             try {
-                const response = await fetch("/api/map?floorId=lobby");
+                const response = await fetch(`/api/map?floorId=${floorId}`);
 
                 if (!response.ok) {
                     throw new Error("Map loading failed");
                 }
 
                 const mapData: MapData = await response.json();
-                setBlockedCells(new Set([...mapData.blockedCells, ...Object.keys(mapData.placedObjects)]));
+                setBlockedCells(new Set(mapData.blockedCells));
                 setPlacedObjects(mapData.placedObjects);
                 setSaveState("idle");
             } catch {
@@ -67,7 +71,7 @@ export default function WorldEditor() {
         }
 
         loadMap();
-    }, []);
+    }, [floorId]);
 
     // Send the current editor state to the API as JSON.
     async function saveMap() {
@@ -79,7 +83,7 @@ export default function WorldEditor() {
         };
 
         try {
-            const response = await fetch("/api/map?floorId=lobby", {
+            const response = await fetch(`/api/map?floorId=${floorId}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(mapData),
@@ -240,7 +244,6 @@ export default function WorldEditor() {
                 ...currentObjects,
                 [key]: selectedAsset,
             }));
-            setBlockedCells((currentCells) => new Set(currentCells).add(key));
             return;
         }
 
@@ -266,7 +269,7 @@ export default function WorldEditor() {
                     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
                         <div>
                             <p className="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Admin editor</p>
-                            <h1 className="mt-1 text-xl font-bold">Lobby layout</h1>
+                            <h1 className="mt-1 text-xl font-bold">{getFloor(floorId).name} layout</h1>
                         </div>
                         <div className="flex items-center gap-2 text-xs text-slate-500">
                             <span>{blockedCells.size} walls</span>
@@ -382,6 +385,21 @@ export default function WorldEditor() {
                 <aside className="w-full shrink-0 rounded-xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/30 lg:w-72">
                     {/* The sidebar contains editing tools, asset upload, and save status. */}
                     <p className="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Tools</p>
+                    {/* The selected floor determines which PostgreSQL map is loaded and saved. */}
+                    <label className="mt-3 block text-sm font-semibold text-slate-700">
+                        Floor
+                        <select
+                            value={floorId}
+                            className="mt-2 w-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                            onChange={(event) => setFloorId(event.target.value as FloorId)}
+                        >
+                            {floors.map((floor) => (
+                                <option key={floor.id} value={floor.id}>
+                                    {floor.number} - {floor.name}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
                     <div className="mt-3 grid grid-cols-3 gap-2">
                         {(["collision", "object", "erase"] as EditorTool[]).map((editorTool) => (
                             <button

@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
+import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject } from "@/lib/map-types";
 
 const MIN_ZOOM = 0.5;
@@ -97,6 +98,7 @@ function clampZoom(value: number) {
 
 export default function WorldViewport() {
     // Store the saved collision cells and objects received from the admin editor.
+    const [floorId, setFloorId] = useState<FloorId>("lobby");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, MapObject>>({});
     const [zoom, setZoom] = useState(1);
@@ -109,11 +111,14 @@ export default function WorldViewport() {
     const cameraOffsetRef = useRef(cameraOffset);
     const isMoving = useRef(false);
 
-    // Load the same floor map that the admin editor saves in PostgreSQL.
+    // Load the same selected floor map that the admin editor saves in PostgreSQL.
     useEffect(() => {
         async function loadMap() {
+            setBlockedCells(new Set());
+            setPlacedObjects({});
+
             try {
-                const response = await fetch("/api/map?floorId=lobby");
+                const response = await fetch(`/api/map?floorId=${floorId}`);
 
                 if (!response.ok) {
                     throw new Error("Map loading failed");
@@ -128,7 +133,7 @@ export default function WorldViewport() {
         }
 
         loadMap();
-    }, []);
+    }, [floorId]);
 
     // Move the player only when BFS can find a route through free cells.
     async function movePlayer(target: CellPosition) {
@@ -260,11 +265,24 @@ export default function WorldViewport() {
             <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(15,23,42,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.08)_1px,transparent_1px)] bg-size-[64px_64px]" />
 
             <div className="absolute left-4 top-4 z-10 flex flex-col gap-1 rounded-lg border border-slate-200 bg-white/95 px-6 py-4 shadow-lg shadow-slate-300/30 backdrop-blur-sm">
+                {/* Public users can switch between the maps created in admin. */}
+                <select
+                    value={floorId}
+                    className="mb-2 w-fit border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-emerald-700 outline-none focus:border-emerald-500"
+                    aria-label="Select floor"
+                    onChange={(event) => setFloorId(event.target.value as FloorId)}
+                >
+                    {floors.map((floor) => (
+                        <option key={floor.id} value={floor.id}>
+                            Floor {floor.number} - {floor.name}
+                        </option>
+                    ))}
+                </select>
                 <p className="text-xs font-bold uppercase tracking-[0.3em] text-emerald-600">
-                    Floor 00
+                    Floor {getFloor(floorId).number}
                 </p>
-                <h1 className="text-2xl font-bold tracking-tight">Lobby</h1>
-                <p className="mt-1 text-sm text-slate-500">Main building entrance</p>
+                <h1 className="text-2xl font-bold tracking-tight">{getFloor(floorId).name}</h1>
+                <p className="mt-1 text-sm text-slate-500">{getFloor(floorId).status}</p>
             </div>
 
             <div className="absolute inset-0 overflow-hidden">

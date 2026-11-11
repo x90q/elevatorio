@@ -1,14 +1,6 @@
 import Link from "next/link";
 import Navbar from "@/components/layout/Navbar";
-
-// Floor directory data can later come from the database or an admin-managed API.
-const floors = [
-  { number: "04", name: "London", status: "Really? London?" },
-  { number: "03", name: "Moscow", status: "Here comes the tanks!" },
-  { number: "02", name: "Singapore", status: "Oh wow" },
-  { number: "01", name: "Tokyo", status: "Want some sushi?" },
-  { number: "00", name: "Lobby", status: "Our home" },
-];
+import { floors } from "@/lib/floors";
 
 // Landing page composition: shared navigation, building introduction, and floor directory.
 export default function Home() {
@@ -65,7 +57,7 @@ export default function Home() {
           </div>
 
           <div className="divide-y divide-slate-200 border-y border-slate-200">
-            {floors.map((floor) => (
+            {[...floors].reverse().map((floor) => (
               <Link
                 key={floor.number}
                 href="/world"
