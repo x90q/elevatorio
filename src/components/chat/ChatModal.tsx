@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 type ChatModalProps = {
     onClose: () => void;
@@ -107,6 +107,17 @@ export default function ChatModal({ onClose }: ChatModalProps) {
     const [activeChatType, setActiveChatType] = useState<ChatType>("DM");
     const [messages, setMessages] = useState(initialMessages);
     const [draft, setDraft] = useState("");
+
+    // Lock the page behind the modal so a scrollbar cannot shift the chat on narrow screens.
+    useEffect(() => {
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+
+        return () => {
+            document.body.style.overflow = previousOverflow;
+        };
+    }, []);
+
     // Resolve the selected conversation once for the header, list, and composer.
     const activeChat = conversations.find((conversation) => conversation.id === activeConversation);
 
@@ -153,35 +164,35 @@ export default function ChatModal({ onClose }: ChatModalProps) {
     // The modal separates navigation, conversation content, and message composition.
     return (
         <section
-            className="fixed bottom-2 left-2 top-18 z-20 flex w-full max-w-md flex-col overflow-hidden border border-slate-300 bg-white text-slate-900 shadow-2xl rounded-xl"
+            className="fixed inset-x-2 bottom-2 top-18 z-20 flex w-auto max-w-none touch-manipulation flex-col overflow-hidden rounded-xl border border-slate-300 bg-white text-slate-900 shadow-2xl md:left-4 md:right-auto md:w-full md:max-w-md"
             role="dialog"
             aria-modal="true"
             aria-labelledby="chat-modal-title"
         >
             <div className="flex min-h-0 flex-1 flex-col">
                 <header className="border-b border-slate-200 bg-white px-4 py-4">
-                    <div className="flex items-center justify-between">
-                        <div>
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                        <div className="min-w-0">
                             <div className="flex items-center gap-2">
                                 {activeChatType === "DM" && activeChat && (
                                     <button
                                         type="button"
-                                        className="text-lg leading-none text-slate-400 transition hover:text-slate-900"
+                                        className="touch-manipulation text-lg leading-none text-slate-400 transition hover:text-slate-900"
                                         aria-label="Back to direct messages"
                                         onClick={() => setActiveConversation("")}
                                     >
                                         &larr;
                                     </button>
                                 )}
-                                <div>
+                                <div className="min-w-0">
                                     <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-600">Building chat</p>
-                                    <h2 id="chat-modal-title" className="mt-1 text-lg font-bold">{activeChat?.name ?? (activeChatType === "DM" ? "Direct messages" : activeChatType)}</h2>
+                                    <h2 id="chat-modal-title" className="mt-1 truncate text-lg font-bold">{activeChat?.name ?? (activeChatType === "DM" ? "Direct messages" : activeChatType)}</h2>
                                 </div>
                             </div>
                         </div>
                         <button
                             type="button"
-                            className="text-2xl leading-none text-slate-400 transition hover:text-slate-900"
+                            className="touch-manipulation text-2xl leading-none text-slate-400 transition hover:text-slate-900"
                             aria-label="Close chat"
                             onClick={onClose}
                         >
@@ -196,7 +207,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
                         <button
                             key={chatType}
                             type="button"
-                            className={`rounded-md px-2 py-2 text-xs font-semibold transition ${activeChatType === chatType
+                            className={`touch-manipulation rounded-md px-2 py-2 text-xs font-semibold transition ${activeChatType === chatType
                                 ? "bg-white text-emerald-700 shadow-sm"
                                 : "text-slate-500 hover:bg-white/70 hover:text-slate-800"
                                 }`}
@@ -215,7 +226,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
                                 <button
                                     key={conversation.id}
                                     type="button"
-                                    className="flex w-full items-center gap-3 rounded-xl bg-white p-3 text-left shadow-sm ring-1 ring-slate-200 transition hover:ring-emerald-300"
+                                    className="flex w-full touch-manipulation items-center gap-3 rounded-xl bg-white p-3 text-left shadow-sm ring-1 ring-slate-200 transition hover:ring-emerald-300"
                                     onClick={() => setActiveConversation(conversation.id)}
                                 >
                                     <span className="grid size-9 shrink-0 place-items-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">
@@ -265,11 +276,11 @@ export default function ChatModal({ onClose }: ChatModalProps) {
                         onChange={(event) => setDraft(event.target.value)}
                         placeholder="Write a message..."
                         aria-label="Message"
-                        className="min-w-0 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                        className="min-w-0 flex-1 touch-manipulation rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-base outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 md:text-sm"
                     />
                     <button
                         type="submit"
-                        className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="touch-manipulation rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                         disabled={!draft.trim()}
                     >
                         Send

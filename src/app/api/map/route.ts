@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { floors } from "@/lib/floors";
 import { pool } from "@/lib/db";
 import { MapData } from "@/lib/map-types";
+import { getCurrentSession } from "@/lib/require-auth";
 
 // Used when the client omits the floor query parameter.
 const DEFAULT_FLOOR_ID = "lobby";
@@ -40,6 +41,13 @@ function isMapData(value: unknown): value is MapData {
 
 // Load the saved map for one floor, or return an empty map for a new floor.
 export async function GET(request: Request) {
+    // Map data is available only after the browser presents a valid session cookie.
+    const session = await getCurrentSession(request.headers);
+
+    if (!session) {
+        return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    }
+
     // Read the floor key from the URL so each floor has an independent map.
     const floorId = new URL(request.url).searchParams.get("floorId") ?? DEFAULT_FLOOR_ID;
 
@@ -70,6 +78,17 @@ export async function GET(request: Request) {
 
 // Insert a new floor map or replace the existing version of that floor.
 export async function PUT(request: Request) {
+    // Saving the map is an admin action, so a logged-in regular user is not enough.
+    const session = await getCurrentSession(request.headers);
+
+    if (!session) {
+        return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    }
+
+    if (session.user.role !== "admin") {
+        return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+    }
+
     // The request body contains the complete editor snapshot for one floor.
     const floorId = new URL(request.url).searchParams.get("floorId") ?? DEFAULT_FLOOR_ID;
     const body: unknown = await request.json();

@@ -5,12 +5,23 @@ import { useEffect, useRef, useState } from "react";
 import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject, MapRoom } from "@/lib/map-types";
 
+// Zoom is limited so the map cannot become unusably tiny or fill the whole page.
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
+// The +/- buttons change zoom by 10 percentage points per click.
 const ZOOM_STEP = 0.1;
+// Wheel and trackpad use separate sensitivities because their delta values differ.
+const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const TRACKPAD_ZOOM_SENSITIVITY = 0.012;
+// The map contains 60 rows and 60 columns, so it renders 3,600 cells.
 const GRID_SIZE = 60;
+// Every logical cell occupies a 64 by 64 pixel square before zoom is applied.
 const CELL_SIZE = 64;
+// Ignore tiny pointer movements so a click does not immediately become a drag.
 const DRAG_THRESHOLD = 4;
+
+// Public users periodically receive map changes saved by the admin.
+const MAP_REFRESH_INTERVAL = 15_000;
 
 type Point = {
     x: number;
@@ -36,6 +47,7 @@ function isFree(position: CellPosition, blockedCells: Set<string>) {
 
 // Find the shortest walkable route using the current map collision state.
 function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<string>) {
+    // These four vectors represent movement to the neighboring cells: up, right, down, left.
     const directions = [
         { row: -1, column: 0 },
         { row: 0, column: 1 },
@@ -43,11 +55,11 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
         { row: 0, column: -1 },
     ];
 
-    // bfs algorithm search
-
-    // BFS stores pending cells in a queue and prevents duplicate visits with a Set.
+    // BFS checks cells in expanding distance order, which gives the shortest walkable route.
     const queue = [start];
+    // visited prevents the same cell from being added to the queue more than once.
     const visited = new Set([`${start.row}:${start.column}`]);
+    // previous remembers how we reached each cell so the final route can be rebuilt backwards.
     const previous = new Map<string, CellPosition>();
 
     while (queue.length > 0) {
@@ -58,7 +70,7 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
         }
 
         if (current.row === target.row && current.column === target.column) {
-            // Reconstruct the route by following each cell's predecessor back to the start.
+            // Reconstruct the route by following predecessors from target back to start.
             const path = [current];
             let key = `${current.row}:${current.column}`;
 
@@ -96,7 +108,13 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
 }
 
 function clampZoom(value: number) {
+    // Math.max applies the lower limit first; Math.min then applies the upper limit.
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+}
+
+function pointerDistance(first: Point, second: Point) {
+    // Pythagorean distance: sqrt((x2 - x1)^2 + (y2 - y1)^2).
+    return Math.hypot(second.x - first.x, second.y - first.y);
 }
 
 export default function WorldViewport() {
@@ -108,25 +126,49 @@ export default function WorldViewport() {
     const [rooms, setRooms] = useState<Record<string, MapRoom>>({});
     const [zoom, setZoom] = useState(1);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
-    const [isDragging, setIsDragging] = useState(false);
     const [hoveredCell, setHoveredCell] = useState<CellPosition | null>(null);
-    // Player coordinates are grid positions, not screen coordinates.
+    // React state is used for the final stable position that the rendered grid needs to know.
     const [playerPosition, setPlayerPosition] = useState<CellPosition>({ row: 30, column: 30 });
+    // The ref changes on every animation step without re-rendering all 3,600 cells.
+    const playerPositionRef = useRef(playerPosition);
+    // Stores the pointer-down position and camera offset used as the drag origin.
     const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
+    // The outer viewport is needed to convert screen coordinates into map-centered coordinates.
+    const viewportElementRef = useRef<HTMLElement>(null);
+    // Camera transform moves the whole map during drag and focal zoom.
+    const cameraElementRef = useRef<HTMLDivElement>(null);
+    // Grid transform changes scale without asking React to render every cell again.
+    const gridElementRef = useRef<HTMLDivElement>(null);
+    // Player marker position is changed directly while the walking animation runs.
+    const playerElementRef = useRef<HTMLSpanElement>(null);
+    // This highlight follows the player marker without rerendering the grid.
+    const playerTrailRef = useRef<HTMLSpanElement>(null);
+    // These refs mirror React state so event handlers always use the latest values immediately.
     const zoomRef = useRef(zoom);
     const cameraOffsetRef = useRef(cameraOffset);
-    // Prevent overlapping movement animations from competing with each other.
+    // Pointer Events identifies each finger by pointerId; the map stores the latest point per finger.
+    const activePointers = useRef(new Map<number, Point>());
+    // Snapshot taken when the second finger lands: initial distance, zoom, focal point, and offset.
+    const pinchStart = useRef<{ distance: number; zoom: number; midpoint: Point; cameraX: number; cameraY: number } | null>(null);
+    // Stores the browser animation frame used to smooth desktop wheel/trackpad zoom.
+    const wheelAnimationFrame = useRef<number | null>(null);
+    // Accumulates wheel input while one animation frame sequence is still running.
+    const wheelTargetZoom = useRef(zoom);
+    // The latest cursor point is the focal point for the current wheel zoom.
+    const wheelFocalPoint = useRef<Point | null>(null);
+    // Avoid re-rendering the grid when polling returns an unchanged map snapshot.
+    const mapSignatureRef = useRef("");
+    // Prevents a second route from starting while the current route is animating.
     const isMoving = useRef(false);
 
     // Load the same selected floor map that the admin editor saves in PostgreSQL.
     useEffect(() => {
-        async function loadMap() {
-            setBlockedCells(new Set());
-            setPlacedObjects({});
-            setRooms({});
+        let isActive = true;
+        mapSignatureRef.current = "";
 
+        async function refreshMap() {
             try {
-                const response = await fetch(`/api/map?floorId=${floorId}`);
+                const response = await fetch(`/api/map?floorId=${floorId}`, { cache: "no-store" });
 
                 if (!response.ok) {
                     throw new Error("Map loading failed");
@@ -134,15 +176,32 @@ export default function WorldViewport() {
 
                 // The API response is the shared map contract used by admin and public world.
                 const mapData: MapData = await response.json();
-                setBlockedCells(new Set(mapData.blockedCells));
-                setPlacedObjects(mapData.placedObjects);
-                setRooms(mapData.rooms ?? {});
+
+                if (!isActive) {
+                    return;
+                }
+
+                // JSON stringification creates a cheap snapshot key for comparing the whole map response.
+                const nextSignature = JSON.stringify(mapData);
+
+                if (nextSignature !== mapSignatureRef.current) {
+                    mapSignatureRef.current = nextSignature;
+                    setBlockedCells(new Set(mapData.blockedCells));
+                    setPlacedObjects(mapData.placedObjects);
+                    setRooms(mapData.rooms ?? {});
+                }
             } catch (error) {
                 console.error("Failed to load public world map", error);
             }
         }
 
-        loadMap();
+        refreshMap();
+        const refreshTimer = window.setInterval(refreshMap, MAP_REFRESH_INTERVAL);
+
+        return () => {
+            isActive = false;
+            window.clearInterval(refreshTimer);
+        };
     }, [floorId]);
 
     // Find the room rectangle under the cursor so public users see its available actions.
@@ -150,32 +209,74 @@ export default function WorldViewport() {
 
     // Move the player only when BFS can find a route through free cells.
     async function movePlayer(target: CellPosition) {
-        if (
-            !isFree(target, blockedCells) ||
-            isMoving.current ||
-            (target.row === playerPosition.row && target.column === playerPosition.column)
-        ) {
-            return;
-        }
+        const startPosition = playerPositionRef.current;
 
-        const path = findPath(playerPosition, target, blockedCells);
-
-        if (path.length === 0) {
+        if (isMoving.current || (target.row === startPosition.row && target.column === startPosition.column)) {
             return;
         }
 
         isMoving.current = true;
 
-        // Skip the first path item because it is the player's current cell.
-        for (const nextPosition of path.slice(1)) {
-            setPlayerPosition(nextPosition);
-            await new Promise((resolve) => setTimeout(resolve, 120));
-        }
+        try {
+            const response = await fetch(`/api/map?floorId=${floorId}`, { cache: "no-store" });
 
-        isMoving.current = false;
+            if (!response.ok) {
+                throw new Error("Map refresh failed");
+            }
+
+            const mapData: MapData = await response.json();
+            // Use this fresh Set for pathfinding so a newly added wall is respected immediately.
+            const currentBlockedCells = new Set(mapData.blockedCells);
+            const nextSignature = JSON.stringify(mapData);
+
+            if (nextSignature !== mapSignatureRef.current) {
+                mapSignatureRef.current = nextSignature;
+                setBlockedCells(currentBlockedCells);
+                setPlacedObjects(mapData.placedObjects);
+                setRooms(mapData.rooms ?? {});
+            }
+
+            if (!isFree(target, currentBlockedCells)) {
+                return;
+            }
+
+            const path = findPath(startPosition, target, currentBlockedCells);
+
+            if (path.length === 0) {
+                return;
+            }
+
+            // Skip the first path item because it is the player's current cell.
+            for (const nextPosition of path.slice(1)) {
+                playerPositionRef.current = nextPosition;
+                playerElementRef.current?.style.setProperty(
+                    "left",
+                    `${nextPosition.column * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
+                );
+                playerElementRef.current?.style.setProperty(
+                    "top",
+                    `${nextPosition.row * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
+                );
+                playerTrailRef.current?.style.setProperty(
+                    "left",
+                    `${nextPosition.column * CELL_SIZE}px`,
+                );
+                playerTrailRef.current?.style.setProperty(
+                    "top",
+                    `${nextPosition.row * CELL_SIZE}px`,
+                );
+                await new Promise((resolve) => setTimeout(resolve, 120));
+            }
+
+            setPlayerPosition(playerPositionRef.current);
+        } catch (error) {
+            console.error("Failed to refresh map before movement", error);
+        } finally {
+            isMoving.current = false;
+        }
     }
 
-    // Update zoom and camera position while preserving the cursor focal point.
+    // Apply a zoom amount and move the camera so the focal point stays under the cursor.
     function changeZoom(amount: number, focalPoint?: Point) {
         const currentZoom = zoomRef.current;
         const currentOffset = cameraOffsetRef.current;
@@ -188,7 +289,9 @@ export default function WorldViewport() {
         let nextOffset = currentOffset;
 
         if (focalPoint) {
+            // Ratio > 1 means zoom in; ratio < 1 means zoom out.
             const zoomRatio = nextZoom / currentZoom;
+            // This offset compensates for scaling around the map center instead of the cursor.
             nextOffset = {
                 x: currentOffset.x + focalPoint.x * (1 - zoomRatio),
                 y: currentOffset.y + focalPoint.y * (1 - zoomRatio),
@@ -201,10 +304,60 @@ export default function WorldViewport() {
         setCameraOffset(nextOffset);
     }
 
+    // Animate wheel zoom outside React so the 3,600-cell grid is not re-rendered per wheel event.
+    function animateWheelZoom(amount: number, focalPoint: Point) {
+        const baseZoom = wheelAnimationFrame.current === null ? zoomRef.current : wheelTargetZoom.current;
+        wheelTargetZoom.current = clampZoom(baseZoom + amount);
+        wheelFocalPoint.current = focalPoint;
+
+        if (wheelAnimationFrame.current !== null) {
+            return;
+        }
+
+        const animate = () => {
+            const currentZoom = zoomRef.current;
+            const targetZoom = wheelTargetZoom.current;
+            // Move only part of the remaining distance each frame for smooth easing.
+            const difference = targetZoom - currentZoom;
+            const nextZoom = Math.abs(difference) < 0.001 ? targetZoom : currentZoom + difference * 0.22;
+            const currentOffset = cameraOffsetRef.current;
+            const activeFocalPoint = wheelFocalPoint.current;
+            // Recalculate the ratio every frame so the cursor point remains visually fixed.
+            const zoomRatio = nextZoom / currentZoom;
+            const nextOffset = activeFocalPoint
+                ? {
+                    x: currentOffset.x + activeFocalPoint.x * (1 - zoomRatio),
+                    y: currentOffset.y + activeFocalPoint.y * (1 - zoomRatio),
+                }
+                : currentOffset;
+
+            zoomRef.current = nextZoom;
+            cameraOffsetRef.current = nextOffset;
+            gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
+            cameraElementRef.current?.style.setProperty(
+                "transform",
+                `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
+            );
+
+            if (nextZoom === targetZoom) {
+                wheelAnimationFrame.current = null;
+                setZoom(nextZoom);
+                setCameraOffset(nextOffset);
+                return;
+            }
+
+            wheelAnimationFrame.current = requestAnimationFrame(animate);
+        };
+
+        wheelAnimationFrame.current = requestAnimationFrame(animate);
+    }
+
     // Use the wheel for zooming instead of allowing the page to scroll.
     function handleWheel(event: React.WheelEvent<HTMLElement>) {
         event.preventDefault();
-        const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+        const normalizedDelta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+        const sensitivity = event.ctrlKey ? TRACKPAD_ZOOM_SENSITIVITY : WHEEL_ZOOM_SENSITIVITY;
+        const direction = -normalizedDelta * sensitivity;
         const viewport = event.currentTarget.getBoundingClientRect();
         const currentOffset = cameraOffsetRef.current;
         const mapCenter = {
@@ -217,7 +370,7 @@ export default function WorldViewport() {
             y: event.clientY - mapCenter.y,
         };
 
-        changeZoom(direction, focalPoint);
+        animateWheelZoom(direction, focalPoint);
     }
 
     // Start tracking a possible camera drag.
@@ -226,17 +379,70 @@ export default function WorldViewport() {
             return;
         }
 
+        if (event.pointerType === "touch") {
+            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+            if (activePointers.current.size === 2) {
+                const [first, second] = Array.from(activePointers.current.values());
+                const viewport = viewportElementRef.current?.getBoundingClientRect();
+                // The midpoint between fingers is the point the user expects to stay fixed.
+                const midpoint = {
+                    x: (first.x + second.x) / 2,
+                    y: (first.y + second.y) / 2,
+                };
+                pinchStart.current = {
+                    distance: pointerDistance(first, second),
+                    zoom: zoomRef.current,
+                    midpoint,
+                    cameraX: cameraOffsetRef.current.x,
+                    cameraY: cameraOffsetRef.current.y,
+                };
+                if (viewport) {
+                    // Convert the screen midpoint into coordinates relative to the map center.
+                    pinchStart.current.midpoint = {
+                        x: midpoint.x - (viewport.left + viewport.width / 2 + cameraOffsetRef.current.x),
+                        y: midpoint.y - (viewport.top + viewport.height / 2 + cameraOffsetRef.current.y),
+                    };
+                }
+                dragStart.current = null;
+                event.currentTarget.setPointerCapture(event.pointerId);
+            }
+        }
+
         dragStart.current = {
             x: event.clientX,
             y: event.clientY,
             cameraX: cameraOffsetRef.current.x,
             cameraY: cameraOffsetRef.current.y,
         };
-        setIsDragging(false);
     }
 
     // Move the camera only after the pointer passes the drag threshold.
     function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+        if (event.pointerType === "touch" && activePointers.current.has(event.pointerId)) {
+            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+            if (pinchStart.current && activePointers.current.size >= 2) {
+                const [first, second] = Array.from(activePointers.current.values());
+                // A distance ratio of 1.2 means the fingers moved 20% apart, so zoom by 1.2x.
+                const nextZoom = clampZoom(pinchStart.current.zoom * (pointerDistance(first, second) / pinchStart.current.distance));
+                // Scaling around the map center requires an offset correction around the focal point.
+                const zoomRatio = nextZoom / pinchStart.current.zoom;
+                const nextOffset = {
+                    x: pinchStart.current.cameraX + pinchStart.current.midpoint.x * (1 - zoomRatio),
+                    y: pinchStart.current.cameraY + pinchStart.current.midpoint.y * (1 - zoomRatio),
+                };
+                zoomRef.current = nextZoom;
+                cameraOffsetRef.current = nextOffset;
+                cameraElementRef.current?.style.setProperty(
+                    "transform",
+                    `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
+                );
+                gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
+                return;
+            }
+        }
+
         if (!dragStart.current) {
             return;
         }
@@ -244,36 +450,55 @@ export default function WorldViewport() {
         const distanceX = event.clientX - dragStart.current.x;
         const distanceY = event.clientY - dragStart.current.y;
 
-        if (!isDragging && Math.hypot(distanceX, distanceY) < DRAG_THRESHOLD) {
+        if (Math.hypot(distanceX, distanceY) < DRAG_THRESHOLD) {
             return;
         }
 
-        if (!isDragging) {
+        if (!dragStart.current || !event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.setPointerCapture(event.pointerId);
-            setIsDragging(true);
+            event.currentTarget.classList.remove("cursor-grab");
+            event.currentTarget.classList.add("cursor-grabbing");
         }
 
+        // Move the camera directly in CSS so dragging does not re-render all 3,600 cells.
         const nextOffset = {
             x: dragStart.current.cameraX + distanceX,
             y: dragStart.current.cameraY + distanceY,
         };
         cameraOffsetRef.current = nextOffset;
-        setCameraOffset(nextOffset);
+        cameraElementRef.current?.style.setProperty(
+            "transform",
+            `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
+        );
     }
 
     // Finish the drag and release pointer capture.
     function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+        if (event.pointerType === "touch") {
+            activePointers.current.delete(event.pointerId);
+            if (activePointers.current.size < 2 && pinchStart.current) {
+                pinchStart.current = null;
+                setZoom(zoomRef.current);
+                setCameraOffset(cameraOffsetRef.current);
+            }
+        }
+
+        event.currentTarget.classList.remove("cursor-grabbing");
+        event.currentTarget.classList.add("cursor-grab");
+
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
         }
 
         dragStart.current = null;
-        setIsDragging(false);
+        // Commit the final drag position to React after the fast pointer updates finish.
+        setCameraOffset(cameraOffsetRef.current);
     }
 
     return (
         <section
-            className="relative min-h-0 flex-1 overscroll-none overflow-hidden bg-[#eef1ec]"
+            ref={viewportElementRef}
+            className="relative min-h-0 flex-1 touch-none overscroll-none overflow-hidden bg-[#eef1ec]"
             onWheel={handleWheel}
         >
             {/* Decorative background grid behind the interactive world map. */}
@@ -302,15 +527,18 @@ export default function WorldViewport() {
 
             <div className="absolute inset-0 overflow-hidden">
                 <div
+                    ref={cameraElementRef}
                     className="absolute left-1/2 top-1/2"
                     style={{
                         width: GRID_SIZE * CELL_SIZE,
                         height: GRID_SIZE * CELL_SIZE,
                         transform: `translate(-50%, -50%) translate(${cameraOffset.x}px, ${cameraOffset.y}px)`,
+                        willChange: "transform",
                     }}
                 >
                     <div
-                        className={`relative grid bg-white shadow-xl shadow-slate-300/40 ${isDragging ? "cursor-grabbing" : "cursor-default"}`}
+                        ref={gridElementRef}
+                        className="relative grid touch-manipulation cursor-grab bg-white shadow-xl shadow-slate-300/40"
                         style={{
                             width: GRID_SIZE * CELL_SIZE,
                             height: GRID_SIZE * CELL_SIZE,
@@ -318,6 +546,7 @@ export default function WorldViewport() {
                             transform: `scale(${zoom})`,
                             transformOrigin: "center center",
                             willChange: "transform",
+                            contain: "layout paint",
                         }}
                         onPointerDown={handlePointerDown}
                         onPointerMove={handlePointerMove}
@@ -330,7 +559,6 @@ export default function WorldViewport() {
                             const row = Math.floor(index / GRID_SIZE);
                             const column = index % GRID_SIZE;
                             const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
-                            const isPlayer = playerPosition.row === row && playerPosition.column === column;
                             const isFreeCell = isFree({ row, column }, blockedCells);
                             const object = placedObjects[`${row}:${column}`];
 
@@ -338,18 +566,24 @@ export default function WorldViewport() {
                                 <button
                                     key={`${row}-${column}`}
                                     type="button"
-                                    className={`relative size-16 transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isDragging ? "cursor-grabbing" : "cursor-default"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${isPlayer
-                                        ? "z-20 bg-emerald-100 ring-2 ring-emerald-600"
-                                        : !isFreeCell
-                                            ? "bg-white"
-                                            : isHovered
-                                                ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
-                                                : "bg-white hover:bg-emerald-100"
+                                    className={`relative size-16 touch-manipulation cursor-default transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${!isFreeCell
+                                        ? "bg-white"
+                                        : isHovered
+                                            ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
+                                            : "bg-white hover:bg-emerald-100"
                                         }`}
                                     aria-label={`Cell ${column + 1}, ${row + 1}`}
                                     title={isFreeCell ? undefined : "Blocked cell"}
-                                    onMouseEnter={() => setHoveredCell({ row, column })}
-                                    onMouseLeave={() => setHoveredCell(null)}
+                                    onMouseEnter={(event) => {
+                                        if (!dragStart.current && event.buttons === 0) {
+                                            setHoveredCell({ row, column });
+                                        }
+                                    }}
+                                    onMouseLeave={(event) => {
+                                        if (event.buttons === 0) {
+                                            setHoveredCell(null);
+                                        }
+                                    }}
                                     onDoubleClick={() => movePlayer({ row, column })}
                                 >
                                     {object && (
@@ -366,7 +600,19 @@ export default function WorldViewport() {
                             );
                         })}
 
+                        {/* This lightweight overlay keeps the cell highlight visible while the player moves. */}
                         <span
+                            ref={playerTrailRef}
+                            className="pointer-events-none absolute z-20 size-16 border-2 border-emerald-300 bg-emerald-100/40 transition-[left,top] duration-100 ease-linear"
+                            style={{
+                                left: playerPosition.column * CELL_SIZE,
+                                top: playerPosition.row * CELL_SIZE,
+                            }}
+                            aria-hidden="true"
+                        />
+
+                        <span
+                            ref={playerElementRef}
                             className="pointer-events-none absolute z-30 grid size-8 place-items-center rounded-full bg-emerald-600 text-xs font-bold text-white shadow-md transition-[left,top] duration-100 ease-linear"
                             style={{
                                 left: playerPosition.column * CELL_SIZE + CELL_SIZE / 2 - 16,
@@ -381,7 +627,7 @@ export default function WorldViewport() {
             </div>
 
             {/* Show the coordinates and walkability state under the cursor. */}
-            <div className="absolute right-4 top-4 z-10 rounded-lg border border-slate-200 bg-white/95 px-4 py-3 text-right shadow-lg shadow-slate-300/30 backdrop-blur-sm">
+            <div className="absolute right-4 top-4 z-10 hidden rounded-lg border border-slate-200 bg-white/95 px-4 py-3 text-right shadow-lg shadow-slate-300/30 backdrop-blur-sm md:block">
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Cursor position</p>
                 <p className="mt-1 font-mono text-sm font-semibold text-slate-700">
                     {hoveredCell
