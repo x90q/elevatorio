@@ -5,6 +5,7 @@ type ChatModalProps = {
 };
 
 type Conversation = {
+    // Conversation metadata drives both the tab filter and the list presentation.
     id: string;
     type: ChatType;
     name: string;
@@ -16,6 +17,7 @@ type Conversation = {
 type ChatType = "Global" | "Floor" | "Room" | "DM";
 
 type Message = {
+    // conversationId keeps one local message list compatible with future persistence.
     id: number;
     conversationId: string;
     author: string;
@@ -100,10 +102,12 @@ function getInitials(name: string) {
 
 export default function ChatModal({ onClose }: ChatModalProps) {
     // Chat state controls the selected tab, conversation, draft, and local message history.
+    // Empty activeConversation means the DM list is shown instead of a thread.
     const [activeConversation, setActiveConversation] = useState("");
     const [activeChatType, setActiveChatType] = useState<ChatType>("DM");
     const [messages, setMessages] = useState(initialMessages);
     const [draft, setDraft] = useState("");
+    // Resolve the selected conversation once for the header, list, and composer.
     const activeChat = conversations.find((conversation) => conversation.id === activeConversation);
 
     // Append a local message now; this is the seam for a future chat API or websocket.
@@ -115,6 +119,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
             return;
         }
 
+        // Append to the previous message list so existing conversation history is preserved.
         setMessages((currentMessages) => [
             ...currentMessages,
             {
@@ -142,6 +147,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
     }
 
     // Only messages belonging to the active conversation are rendered.
+    // Filter the shared message store down to the currently opened thread.
     const activeMessages = messages.filter((message) => message.conversationId === activeConversation);
 
     // The modal separates navigation, conversation content, and message composition.

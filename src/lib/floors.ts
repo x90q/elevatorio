@@ -7,8 +7,10 @@ export const floors = [
     { id: "london", number: "04", name: "London", status: "Really? London?" },
 ] as const;
 
+// Infer a union of valid IDs directly from the immutable floor registry.
 export type FloorId = (typeof floors)[number]["id"];
 
+// Resolve display metadata for a selected floor with Lobby as the safe fallback.
 export function getFloor(floorId: FloorId) {
     return floors.find((floor) => floor.id === floorId) ?? floors[floors.length - 1];
 }

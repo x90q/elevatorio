@@ -7,6 +7,7 @@ type ProfileModalProps = {
 };
 
 type ProfileForm = {
+    // These fields form the current profile persistence contract.
     displayName: string;
     email: string;
     bio: string;
@@ -14,6 +15,7 @@ type ProfileForm = {
 
 export default function ProfileModal({ onClose }: ProfileModalProps) {
     // Local draft and saved profile states allow edit/cancel without a backend yet.
+    // The saved copy is the last committed version; the form copy is the active draft.
     const [isEditing, setIsEditing] = useState(false);
     const [savedProfile, setSavedProfile] = useState<ProfileForm>({
         displayName: "User Name",
@@ -28,6 +30,7 @@ export default function ProfileModal({ onClose }: ProfileModalProps) {
 
     // Keep all form updates type-safe and reusable across profile fields.
     function updateProfileField(field: keyof ProfileForm, value: string) {
+        // Merge one edited field into the existing draft without resetting other fields.
         setProfileForm((currentProfile) => ({
             ...currentProfile,
             [field]: value,

@@ -8,12 +8,15 @@ import ChatModal from "@/components/chat/ChatModal";
 
 export default function Navbar() {
     // Navbar owns global overlay state so chat and profile stay available on every route.
+    // These booleans are intentionally mutually exclusive in the click handlers below.
     const [isProfileOpen, setIsProfileOpen] = useState(false);
     const [isChatOpen, setIsChatOpen] = useState(false);
+    // Used to reset overlays after client-side route changes.
     const pathname = usePathname();
 
     // Close route-level overlays when navigation changes.
     useEffect(() => {
+        // Defer overlay cleanup so navigation remains responsive during route changes.
         startTransition(() => {
             setIsProfileOpen(false);
             setIsChatOpen(false);

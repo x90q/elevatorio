@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { floors, FloorId, getFloor } from "@/lib/floors";
-import { MapData, MapObject } from "@/lib/map-types";
+import { MapData, MapObject, MapRoom } from "@/lib/map-types";
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
@@ -45,6 +45,7 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
 
     // bfs algorithm search
 
+    // BFS stores pending cells in a queue and prevents duplicate visits with a Set.
     const queue = [start];
     const visited = new Set([`${start.row}:${start.column}`]);
     const previous = new Map<string, CellPosition>();
@@ -57,6 +58,7 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
         }
 
         if (current.row === target.row && current.column === target.column) {
+            // Reconstruct the route by following each cell's predecessor back to the start.
             const path = [current];
             let key = `${current.row}:${current.column}`;
 
@@ -81,6 +83,7 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
             };
             const nextKey = `${next.row}:${next.column}`;
 
+            // Only enqueue in-bounds, walkable cells that BFS has not processed yet.
             if (isFree(next, blockedCells) && !visited.has(nextKey)) {
                 visited.add(nextKey);
                 previous.set(nextKey, current);
@@ -98,17 +101,21 @@ function clampZoom(value: number) {
 
 export default function WorldViewport() {
     // Store the saved collision cells and objects received from the admin editor.
+    // floorId determines which independent map snapshot is displayed publicly.
     const [floorId, setFloorId] = useState<FloorId>("lobby");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, MapObject>>({});
+    const [rooms, setRooms] = useState<Record<string, MapRoom>>({});
     const [zoom, setZoom] = useState(1);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
     const [hoveredCell, setHoveredCell] = useState<CellPosition | null>(null);
+    // Player coordinates are grid positions, not screen coordinates.
     const [playerPosition, setPlayerPosition] = useState<CellPosition>({ row: 30, column: 30 });
     const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
     const zoomRef = useRef(zoom);
     const cameraOffsetRef = useRef(cameraOffset);
+    // Prevent overlapping movement animations from competing with each other.
     const isMoving = useRef(false);
 
     // Load the same selected floor map that the admin editor saves in PostgreSQL.
@@ -116,6 +123,7 @@ export default function WorldViewport() {
         async function loadMap() {
             setBlockedCells(new Set());
             setPlacedObjects({});
+            setRooms({});
 
             try {
                 const response = await fetch(`/api/map?floorId=${floorId}`);
@@ -124,9 +132,11 @@ export default function WorldViewport() {
                     throw new Error("Map loading failed");
                 }
 
+                // The API response is the shared map contract used by admin and public world.
                 const mapData: MapData = await response.json();
                 setBlockedCells(new Set(mapData.blockedCells));
                 setPlacedObjects(mapData.placedObjects);
+                setRooms(mapData.rooms ?? {});
             } catch (error) {
                 console.error("Failed to load public world map", error);
             }
@@ -134,6 +144,9 @@ export default function WorldViewport() {
 
         loadMap();
     }, [floorId]);
+
+    // Find the room rectangle under the cursor so public users see its available actions.
+    const hoveredRoom = hoveredCell ? rooms[`${hoveredCell.row}:${hoveredCell.column}`] : undefined;
 
     // Move the player only when BFS can find a route through free cells.
     async function movePlayer(target: CellPosition) {
@@ -153,6 +166,7 @@ export default function WorldViewport() {
 
         isMoving.current = true;
 
+        // Skip the first path item because it is the player's current cell.
         for (const nextPosition of path.slice(1)) {
             setPlayerPosition(nextPosition);
             await new Promise((resolve) => setTimeout(resolve, 120));
@@ -197,6 +211,7 @@ export default function WorldViewport() {
             x: viewport.left + viewport.width / 2 + currentOffset.x,
             y: viewport.top + viewport.height / 2 + currentOffset.y,
         };
+        // Keep the zoom anchored to the cursor instead of the center of the viewport.
         const focalPoint = {
             x: event.clientX - mapCenter.x,
             y: event.clientY - mapCenter.y,
@@ -311,6 +326,7 @@ export default function WorldViewport() {
                     >
                         {/* Render each saved object inside the cell where it was placed. */}
                         {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
+                            // Convert each flat render index into a grid coordinate pair.
                             const row = Math.floor(index / GRID_SIZE);
                             const column = index % GRID_SIZE;
                             const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
@@ -372,6 +388,11 @@ export default function WorldViewport() {
                         ? `X ${hoveredCell.column + 1} / Y ${hoveredCell.row + 1}`
                         : "Move over a cell"}
                 </p>
+                {hoveredRoom && (
+                    <p className="mt-1 max-w-48 truncate text-sm font-semibold text-emerald-700">
+                        {hoveredRoom.name}
+                    </p>
+                )}
             </div>
 
             {/* Explicit zoom controls for users who do not use the mouse wheel. */}

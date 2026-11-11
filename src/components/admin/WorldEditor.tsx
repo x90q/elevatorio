@@ -3,7 +3,7 @@
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { floors, FloorId, getFloor } from "@/lib/floors";
-import { MapData, MapObject } from "@/lib/map-types";
+import { MapData, MapObject, MapRoom } from "@/lib/map-types";
 
 // Shared editor limits keep the grid and camera behavior predictable.
 const MIN_ZOOM = 0.5;
@@ -13,7 +13,7 @@ const GRID_SIZE = 60;
 const CELL_SIZE = 64;
 const DRAG_THRESHOLD = 4;
 
-type EditorTool = "collision" | "object" | "erase";
+type EditorTool = "collision" | "object" | "room" | "erase";
 
 type PlacedObject = MapObject;
 
@@ -34,19 +34,26 @@ function clampZoom(value: number) {
 
 export default function WorldEditor() {
     // React state contains the editable map and the current viewport controls.
+    // floorId selects which PostgreSQL JSONB snapshot this editor reads and writes.
     const [floorId, setFloorId] = useState<FloorId>("lobby");
     const [tool, setTool] = useState<EditorTool>("collision");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
+    const [rooms, setRooms] = useState<Record<string, MapRoom>>({});
     const [selectedAsset, setSelectedAsset] = useState<PlacedObject | null>(null);
+    const [roomId, setRoomId] = useState("meeting-room");
+    const [roomName, setRoomName] = useState("Meeting room");
+    const [roomError, setRoomError] = useState("");
     const [zoom, setZoom] = useState(1);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
     const [hoveredCell, setHoveredCell] = useState<{ row: number; column: number } | null>(null);
+    // saveState controls loading, disabled, success, and error UI around persistence.
     const [saveState, setSaveState] = useState<"idle" | "loading" | "saving" | "saved" | "error">("loading");
     const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
     const zoomRef = useRef(zoom);
     const cameraOffsetRef = useRef(cameraOffset);
+    // Prevent a drag release from triggering an accidental cell edit.
     const suppressClick = useRef(false);
 
     // Load the selected floor map whenever the admin changes floors.
@@ -62,8 +69,10 @@ export default function WorldEditor() {
                 }
 
                 const mapData: MapData = await response.json();
+                // Rebuild the Set because JSON responses only contain arrays.
                 setBlockedCells(new Set(mapData.blockedCells));
                 setPlacedObjects(mapData.placedObjects);
+                setRooms(mapData.rooms ?? {});
                 setSaveState("idle");
             } catch {
                 setSaveState("error");
@@ -78,8 +87,10 @@ export default function WorldEditor() {
         setSaveState("saving");
 
         const mapData: MapData = {
+            // Convert Set to an array because JSON.stringify cannot serialize Set entries.
             blockedCells: Array.from(blockedCells),
             placedObjects,
+            rooms,
         };
 
         try {
@@ -112,6 +123,7 @@ export default function WorldEditor() {
         let nextOffset = currentOffset;
 
         if (focalPoint) {
+            // Adjust the camera offset so the point under the cursor stays fixed during zoom.
             const zoomRatio = nextZoom / currentZoom;
             nextOffset = {
                 x: currentOffset.x + focalPoint.x * (1 - zoomRatio),
@@ -130,6 +142,7 @@ export default function WorldEditor() {
         event.preventDefault();
         const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
         const viewport = event.currentTarget.getBoundingClientRect();
+        // Convert the pointer position from viewport coordinates into map-centered coordinates.
         const focalPoint = {
             x: event.clientX - (viewport.left + viewport.width / 2 + cameraOffsetRef.current.x),
             y: event.clientY - (viewport.top + viewport.height / 2 + cameraOffsetRef.current.y),
@@ -173,6 +186,7 @@ export default function WorldEditor() {
             setIsDragging(true);
         }
 
+        // Apply pointer movement to the camera while preserving the original drag origin.
         const nextOffset = {
             x: dragStart.current.cameraX + distanceX,
             y: dragStart.current.cameraY + distanceY,
@@ -225,6 +239,7 @@ export default function WorldEditor() {
         const key = cellKey(row, column);
 
         if (tool === "collision") {
+            // Use the previous Set to avoid losing edits when React batches rapid clicks.
             setBlockedCells((currentCells) => {
                 const nextCells = new Set(currentCells);
 
@@ -240,10 +255,39 @@ export default function WorldEditor() {
         }
 
         if (tool === "object" && selectedAsset) {
+            // Replace an existing object at this cell or create a new placement.
             setPlacedObjects((currentObjects) => ({
                 ...currentObjects,
                 [key]: selectedAsset,
             }));
+            return;
+        }
+
+        if (tool === "room") {
+            const trimmedRoomId = roomId.trim();
+            const trimmedRoomName = roomName.trim();
+            const isValidRoomId = /^[a-z0-9][a-z0-9_-]*$/.test(trimmedRoomId);
+
+            if (!trimmedRoomId || !isValidRoomId) {
+                setRoomError("Use a lowercase ID with letters, numbers, hyphens, or underscores.");
+                return;
+            }
+
+            if (!trimmedRoomName) {
+                setRoomError("Room name is required.");
+                return;
+            }
+
+            // Each click paints one cell, so a room can have any shape instead of fixed dimensions.
+            setRooms((currentRooms) => {
+                const nextRooms = { ...currentRooms };
+                nextRooms[key] = {
+                    id: trimmedRoomId,
+                    name: trimmedRoomName,
+                };
+                return nextRooms;
+            });
+            setRoomError("");
             return;
         }
 
@@ -258,6 +302,12 @@ export default function WorldEditor() {
                 delete nextObjects[key];
                 return nextObjects;
             });
+            setRooms((currentRooms) => {
+                const nextRooms = { ...currentRooms };
+                delete nextRooms[key];
+                return nextRooms;
+            });
+            setRoomError("");
         }
     }
 
@@ -274,6 +324,7 @@ export default function WorldEditor() {
                         <div className="flex items-center gap-2 text-xs text-slate-500">
                             <span>{blockedCells.size} walls</span>
                             <span>{Object.keys(placedObjects).length} objects</span>
+                            <span>{Object.keys(rooms).length} room's cells</span>
                             <button
                                 type="button"
                                 className="rounded-lg bg-emerald-600 px-3 py-2 font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
@@ -299,6 +350,14 @@ export default function WorldEditor() {
                                     ? `X ${hoveredCell.column + 1} / Y ${hoveredCell.row + 1}`
                                     : "Move over a cell"}
                             </p>
+                            {hoveredCell && rooms[cellKey(hoveredCell.row, hoveredCell.column)] && (
+                                <p className="mt-1 max-w-48 truncate text-sm font-semibold text-blue-700">
+                                    Room: {rooms[cellKey(hoveredCell.row, hoveredCell.column)].name}
+                                    <span className="block text-xs font-medium text-slate-500">
+                                        ID: {rooms[cellKey(hoveredCell.row, hoveredCell.column)].id}
+                                    </span>
+                                </p>
+                            )}
                         </div>
                         <div className="absolute inset-0 overflow-hidden">
                             <div
@@ -325,18 +384,20 @@ export default function WorldEditor() {
                                     onPointerCancel={handlePointerUp}
                                 >
                                     {/* Each button represents one editable map cell. */}
+                                    {/* Derive row and column from the flat array index for each cell. */}
                                     {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
                                         const row = Math.floor(index / GRID_SIZE);
                                         const column = index % GRID_SIZE;
                                         const key = cellKey(row, column);
                                         const object = placedObjects[key];
                                         const isBlocked = blockedCells.has(key);
+                                        const room = rooms[key];
 
                                         return (
                                             <button
                                                 key={key}
                                                 type="button"
-                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isBlocked ? "border-red-400 bg-red-50/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
+                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${room ? "border-blue-400 bg-blue-50/20 z-10 ring-2 ring-blue-500" : isBlocked ? "border-red-400 bg-red-50/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
                                                 aria-label={`Edit cell ${column + 1}, ${row + 1}`}
                                                 onMouseEnter={() => setHoveredCell({ row, column })}
                                                 onMouseLeave={() => setHoveredCell(null)}
@@ -351,6 +412,11 @@ export default function WorldEditor() {
                                                         unoptimized
                                                         className="pointer-events-none absolute inset-0 size-full object-contain"
                                                     />
+                                                )}
+                                                {room && (
+                                                    <span className="pointer-events-none absolute inset-x-1 bottom-1 truncate text-[9px] font-bold text-slate-700">
+                                                        {room.name}
+                                                    </span>
                                                 )}
                                             </button>
                                         );
@@ -400,8 +466,8 @@ export default function WorldEditor() {
                             ))}
                         </select>
                     </label>
-                    <div className="mt-3 grid grid-cols-3 gap-2">
-                        {(["collision", "object", "erase"] as EditorTool[]).map((editorTool) => (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                        {(["collision", "object", "room", "erase"] as EditorTool[]).map((editorTool) => (
                             <button
                                 key={editorTool}
                                 type="button"
@@ -412,6 +478,39 @@ export default function WorldEditor() {
                             </button>
                         ))}
                     </div>
+
+                    {tool === "room" && (
+                        <div className="mt-4 space-y-3">
+                            <label className="block text-sm font-semibold text-slate-700">
+                                Room ID
+                                <input
+                                    type="text"
+                                    value={roomId}
+                                    placeholder="meeting-room"
+                                    aria-invalid={Boolean(roomError)}
+                                    className="mt-2 w-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                                    onChange={(event) => {
+                                        setRoomId(event.target.value);
+                                        setRoomError("");
+                                    }}
+                                />
+                            </label>
+                            <label className="block text-sm font-semibold text-slate-700">
+                                Room name
+                                <input
+                                    type="text"
+                                    value={roomName}
+                                    className="mt-2 w-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                                    onChange={(event) => {
+                                        setRoomName(event.target.value);
+                                        setRoomError("");
+                                    }}
+                                />
+                            </label>
+                            <p className="text-xs font-normal text-slate-500">Click cells to paint any room shape.</p>
+                            {roomError && <p className="text-xs font-medium text-red-600">{roomError}</p>}
+                        </div>
+                    )}
 
                     <label className="mt-6 block text-sm font-semibold text-slate-700">
                         Upload PNG object
