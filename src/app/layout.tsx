@@ -4,7 +4,7 @@ import "./globals.css";
 
 // App-wide metadata is the main place to customize browser and search-engine labels.
 export const metadata: Metadata = {
-  title: "elevator",
+  title: "Elevatorio - The vertical social space",
   description: "Pixel office world with floors, rooms and communication",
 };
 

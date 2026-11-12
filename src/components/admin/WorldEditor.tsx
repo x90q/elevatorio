@@ -5,6 +5,63 @@ import Image from "next/image";
 import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject, MapRoom } from "@/lib/map-types";
 
+/*
+ * WORLD EDITOR: порядок выполнения после открытия /admin
+ *
+ * Компонент является редактором уровня. Его принцип похож на level editor в игре:
+ * получить snapshot этажа, показать его в viewport, изменить модель инструментами,
+ * затем сохранить весь snapshot обратно в PostgreSQL. React state является source
+ * of truth, DOM является визуализацией, refs нужны для быстрых pointer-операций.
+ *
+ * 1. React вызывает WorldEditor(). Создаются начальные значения: lobby, пустые
+ *    blockedCells, placedObjects и rooms, tool = collision, zoom = 1,
+ *    saveState = loading и mapLoadState = loading.
+ *
+ * 2. useEffect восстановления этажа после mount читает localStorage по
+ *    FLOOR_STORAGE_KEY. Если найден допустимый FloorId, setFloorId восстанавливает
+ *    его. setIsFloorReady(true) разрешает загрузку и не вызывает hydration mismatch.
+ *
+ * 3. useEffect загрузки после isFloorReady запускает loadMap(). Функция получает
+ *    mapRequestId, переводит редактор в loading и делает GET /api/map?floorId=...
+ *    Проверки response.ok, isActive и requestId не дают старому fetch записать
+ *    данные после смены этажа или размонтирования компонента.
+ *
+ * 4. loadMap() записывает ответ в React state. blockedCells превращается из JSON
+ *    массива в Set для быстрых collision-проверок, а placedObjects и rooms остаются
+ *    объектами с ключом "row:column". После setState React делает commit JSX.
+ *
+ * 5. checkVisualReady() отделяет network readiness от render readiness. Через
+ *    requestAnimationFrame он ждет layout, проверяет размер grid и состояние всех
+ *    img. onLoad сообщает об успешной текстуре, onError помечает только сломанный
+ *    asset как failed, поэтому одна битая картинка не оставляет весь уровень в loading.
+
+ * 6. MIN_LOADING_TIME удерживает overlay минимум одну секунду. После этого
+ *    setMapLoadState("ready") убирает блокировку ввода через fade-out. Сообщение
+ *    ошибки рендерится только при mapLoadState = error.
+
+ * 7. Камера и сетка разделены. cameraElementRef двигает весь уровень через
+ *    translate, gridElementRef масштабирует сетку через scale. changeZoom сохраняет
+ *    focal point под курсором, а wheel и pinch используют requestAnimationFrame.
+ *    Это позволяет двигать viewport плавно, не пересоздавая 3,600 клеток.
+
+ * 8. handleCellClick изменяет модель выбранным tool, а не DOM напрямую. collision
+ *    переключает клетку в Set стен, object размещает selectedAsset, room записывает
+ *    id/name комнаты, erase удаляет все данные клетки. React затем показывает модель.
+
+ * 9. handleAssetUpload читает локальный image file через FileReader и превращает его
+ *    в data URL. selectedAsset хранит текстуру до размещения, после чего она попадает
+ *    в placedObjects и может быть сохранена внутри map_data.
+
+ * 10. saveMap() отправляет полный MapData одним PUT. Set стен превращается в массив,
+ *     потому что JSON.stringify не сериализует Set. API делает upsert по floorId,
+ *     поэтому один этаж восстанавливается как единый детерминированный snapshot.
+
+ * 11. При смене этажа select вызывает resetViewport(): камера, zoom и loading
+ *     сбрасываются. Cleanup останавливает таймеры и отменяет устаревшие проверки,
+ *     после чего новый этаж снова проходит путь:
+ *     GET -> React state -> DOM -> assets -> checkVisualReady -> ready.
+ */
+
 // Shared editor limits keep the grid and camera behavior predictable.
 // Zoom is limited so the editor remains usable at both extremes.
 const MIN_ZOOM = 0.5;
@@ -20,6 +77,9 @@ const GRID_SIZE = 60;
 const CELL_SIZE = 64;
 // Ignore tiny pointer movements so a click does not immediately become a drag.
 const DRAG_THRESHOLD = 4;
+const FLOOR_STORAGE_KEY = "elevatorio:admin-floor";
+// Keep the loading screen visible long enough to avoid an abrupt first render.
+const MIN_LOADING_TIME = 1000;
 
 type EditorTool = "collision" | "object" | "room" | "erase";
 
@@ -47,9 +107,14 @@ function pointerDistance(first: Point, second: Point) {
 }
 
 export default function WorldEditor() {
+    // The editor is the level-authoring side of the engine: it edits one in-memory
+    // snapshot, previews the result, and persists the complete snapshot to PostgreSQL.
     // React state contains the editable map and the current viewport controls.
+    // State is the source of truth for edits; refs are only the fast path for camera input.
     // floorId selects which PostgreSQL JSONB snapshot this editor reads and writes.
     const [floorId, setFloorId] = useState<FloorId>("lobby");
+    const [isFloorReady, setIsFloorReady] = useState(false);
+    const [mapLoadState, setMapLoadState] = useState<"loading" | "ready" | "error">("loading");
     const [tool, setTool] = useState<EditorTool>("collision");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
@@ -86,11 +151,112 @@ export default function WorldEditor() {
     const wheelFocalPoint = useRef<Point | null>(null);
     // Prevent a drag release from triggering an accidental cell edit.
     const suppressClick = useRef(false);
+    // Tracks the browser frame used to verify that the current grid and its images are visible.
+    const visualCheckFrame = useRef<number | null>(null);
+    // Keeps the loading overlay visible for a consistent minimum duration.
+    const visualReadyTimer = useRef<number | null>(null);
+    // Separates a successful API response from the later DOM/image rendering check.
+    const mapDataReady = useRef(false);
+    const loadingStartedAt = useRef(0);
+    const mapRequestId = useRef(0);
+
+    // Restore the last selected editor floor only in the browser, after hydration is complete.
+    useEffect(() => {
+        const restoreFloor = window.setTimeout(() => {
+            const storedFloor = window.localStorage.getItem(FLOOR_STORAGE_KEY);
+
+            if (floors.some((floor) => floor.id === storedFloor)) {
+                setFloorId(storedFloor as FloorId);
+            }
+
+            setIsFloorReady(true);
+        }, 0);
+
+        return () => window.clearTimeout(restoreFloor);
+    }, []);
+
+    // Keep the selected editor floor across page reloads.
+    useEffect(() => {
+        if (isFloorReady) {
+            window.localStorage.setItem(FLOOR_STORAGE_KEY, floorId);
+        }
+    }, [floorId, isFloorReady]);
+
+    // Reset the camera before loading another floor.
+    function resetViewport() {
+        if (wheelAnimationFrame.current !== null) {
+            cancelAnimationFrame(wheelAnimationFrame.current);
+            wheelAnimationFrame.current = null;
+        }
+
+        activePointers.current.clear();
+        pinchStart.current = null;
+        dragStart.current = null;
+        suppressClick.current = false;
+        zoomRef.current = 1;
+        cameraOffsetRef.current = { x: 0, y: 0 };
+        wheelTargetZoom.current = 1;
+        setZoom(1);
+        setCameraOffset({ x: 0, y: 0 });
+        setMapLoadState("loading");
+        loadingStartedAt.current = performance.now();
+        if (visualReadyTimer.current !== null) {
+            window.clearTimeout(visualReadyTimer.current);
+            visualReadyTimer.current = null;
+        }
+    }
+
+    // Loading is complete only after both phases finish: the API delivered level data,
+    // and the browser committed the grid plus its image assets to the DOM.
+    function checkVisualReady() {
+        if (visualCheckFrame.current !== null) {
+            cancelAnimationFrame(visualCheckFrame.current);
+        }
+
+        visualCheckFrame.current = requestAnimationFrame(() => {
+            const grid = gridElementRef.current;
+            const images = grid ? Array.from(grid.querySelectorAll("img")) : [];
+            // A non-zero layout box confirms that the grid is mounted and visible.
+            const gridDrawn = Boolean(grid && grid.getBoundingClientRect().width > 0 && grid.getBoundingClientRect().height > 0);
+            // naturalWidth stays zero when an image has not loaded or failed to decode.
+            const imagesDrawn = images.every(
+                (image) => (image.complete && image.naturalWidth > 0) || image.dataset.loadState === "failed",
+            );
+
+            if (mapDataReady.current && gridDrawn && imagesDrawn) {
+                const remainingTime = Math.max(0, MIN_LOADING_TIME - (performance.now() - loadingStartedAt.current));
+
+                if (visualReadyTimer.current === null) {
+                    visualReadyTimer.current = window.setTimeout(() => {
+                        setMapLoadState("ready");
+                        visualReadyTimer.current = null;
+                    }, remainingTime);
+                }
+            }
+
+            visualCheckFrame.current = null;
+        });
+    }
 
     // Load the selected floor map whenever the admin changes floors.
     useEffect(() => {
+        if (!isFloorReady) {
+            return;
+        }
+
+        let isActive = true;
+
         async function loadMap() {
+            const requestId = ++mapRequestId.current;
+            // Disable editor interaction until the new floor is loaded and visibly rendered.
             setSaveState("loading");
+            setMapLoadState("loading");
+            mapDataReady.current = false;
+            loadingStartedAt.current = performance.now();
+            if (visualReadyTimer.current !== null) {
+                window.clearTimeout(visualReadyTimer.current);
+                visualReadyTimer.current = null;
+            }
 
             try {
                 const response = await fetch(`/api/map?floorId=${floorId}`);
@@ -100,20 +266,49 @@ export default function WorldEditor() {
                 }
 
                 const mapData: MapData = await response.json();
+                if (!isActive || requestId !== mapRequestId.current) {
+                    return;
+                }
+
                 // Rebuild the Set because JSON responses only contain arrays.
                 setBlockedCells(new Set(mapData.blockedCells));
                 setPlacedObjects(mapData.placedObjects);
                 setRooms(mapData.rooms ?? {});
                 setSaveState("idle");
+                mapDataReady.current = true;
+                checkVisualReady();
             } catch {
+                if (!isActive || requestId !== mapRequestId.current) {
+                    return;
+                }
+
                 setSaveState("error");
+                setMapLoadState("error");
             }
         }
 
         loadMap();
-    }, [floorId]);
+        return () => {
+            isActive = false;
+            mapRequestId.current += 1;
+            if (visualCheckFrame.current !== null) {
+                cancelAnimationFrame(visualCheckFrame.current);
+            }
+            if (visualReadyTimer.current !== null) {
+                window.clearTimeout(visualReadyTimer.current);
+            }
+        };
+    }, [floorId, isFloorReady]);
 
-    // Send the current editor state to the API as JSON.
+    // Recheck after React has committed the new grid and its image elements.
+    useEffect(() => {
+        if (isFloorReady && mapLoadState === "loading") {
+            checkVisualReady();
+        }
+    }, [floorId, isFloorReady, mapLoadState, placedObjects]);
+
+    // Save the whole level snapshot rather than individual clicks. This keeps the
+    // database format deterministic and lets one floor be restored as a single unit.
     async function saveMap() {
         setSaveState("saving");
 
@@ -379,7 +574,8 @@ export default function WorldEditor() {
         reader.readAsDataURL(file);
     }
 
-    // Apply the selected editor tool to one grid cell.
+    // A tool changes the level model, not the DOM directly. React then re-renders the
+    // affected cell from the new model, keeping collision, objects, and rooms consistent.
     function handleCellClick(row: number, column: number) {
         if (suppressClick.current) {
             suppressClick.current = false;
@@ -461,7 +657,8 @@ export default function WorldEditor() {
         }
     }
 
-    // The main viewport contains the editable map and its camera controls.
+    // The main viewport is the editor's renderer: the grid shows the current model,
+    // while the camera transforms let us inspect it without changing map coordinates.
     return (
         <main className="min-h-dvh bg-[#eef1ec] pt-16 text-slate-950">
             <div className="mx-auto flex min-h-[calc(100dvh-4rem)] max-w-[1600px] flex-col gap-4 p-2 sm:p-4 lg:flex-row">
@@ -488,8 +685,9 @@ export default function WorldEditor() {
 
                     <div
                         ref={viewportElementRef}
-                        className="relative min-h-0 flex-1 touch-none overscroll-none overflow-hidden bg-[#f7f9f6]"
+                        className="relative min-h-0 flex-1 touch-none select-none overscroll-none overflow-hidden bg-[#f7f9f6]"
                         onWheel={handleWheel}
+                        onDoubleClick={(event) => event.preventDefault()}
                     >
                         <div className="absolute left-4 top-4 z-10 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-600 shadow-md backdrop-blur-sm">
                             Editor viewport
@@ -528,7 +726,7 @@ export default function WorldEditor() {
                             >
                                 <div
                                     ref={gridElementRef}
-                                    className="grid touch-manipulation cursor-grab border border-slate-300 bg-white shadow-lg"
+                                    className="grid touch-manipulation select-none cursor-grab border border-slate-300 bg-white shadow-lg"
                                     style={{
                                         width: GRID_SIZE * CELL_SIZE,
                                         height: GRID_SIZE * CELL_SIZE,
@@ -579,6 +777,11 @@ export default function WorldEditor() {
                                                         height={64}
                                                         unoptimized
                                                         className="pointer-events-none absolute inset-0 size-full object-contain"
+                                                        onLoad={checkVisualReady}
+                                                        onError={(event) => {
+                                                            event.currentTarget.dataset.loadState = "failed";
+                                                            checkVisualReady();
+                                                        }}
                                                     />
                                                 )}
                                                 {room && (
@@ -613,6 +816,33 @@ export default function WorldEditor() {
                                 -
                             </button>
                         </div>
+                        <div
+                            className={`absolute inset-0 z-30 grid place-items-center bg-[#f7f9f6]/95 backdrop-blur-sm transition-opacity duration-300 ease-out ${mapLoadState === "ready" ? "pointer-events-none opacity-0" : "pointer-events-auto opacity-100"}`}
+                            aria-hidden={mapLoadState === "ready"}
+                        >
+                            <div className="rounded-xl border border-slate-200 bg-white px-6 py-5 text-center shadow-xl">
+                                {mapLoadState === "error" ? (
+                                    <>
+                                        <p className="text-sm font-semibold text-red-600">Could not load this floor</p>
+                                        <button
+                                            type="button"
+                                            className="mt-3 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white"
+                                            onClick={() => window.location.reload()}
+                                        >
+                                            Reload
+                                        </button>
+                                    </>
+                                ) : mapLoadState === "loading" ? (
+                                    <>
+                                        <div className="mx-auto size-8 animate-spin rounded-full border-4 border-emerald-100 border-t-emerald-600" />
+                                        <p className="mt-3 text-sm font-semibold text-slate-700">Loading floor...</p>
+                                        <p className="mt-1 text-xs text-slate-500">Drawing the grid and images</p>
+                                    </>
+                                ) : (
+                                    null
+                                )}
+                            </div>
+                        </div>
                     </div>
                 </section>
 
@@ -624,8 +854,11 @@ export default function WorldEditor() {
                         Floor
                         <select
                             value={floorId}
-                            className="mt-2 w-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
-                            onChange={(event) => setFloorId(event.target.value as FloorId)}
+                            className="rounded-lg mt-2 w-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                            onChange={(event) => {
+                                resetViewport();
+                                setFloorId(event.target.value as FloorId);
+                            }}
                         >
                             {floors.map((floor) => (
                                 <option key={floor.id} value={floor.id}>

@@ -58,7 +58,7 @@ export default function Navbar() {
                         href="/"
                         className="text-lg font-bold tracking-wide text-emerald-600"
                     >
-                        Elevator
+                        Elevatorio
                     </Link>
 
                     <div className="hidden items-center gap-6 text-sm text-slate-600 md:flex">

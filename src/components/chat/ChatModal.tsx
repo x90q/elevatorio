@@ -164,7 +164,7 @@ export default function ChatModal({ onClose }: ChatModalProps) {
     // The modal separates navigation, conversation content, and message composition.
     return (
         <section
-            className="fixed inset-x-2 bottom-2 top-18 z-20 flex w-auto max-w-none touch-manipulation flex-col overflow-hidden rounded-xl border border-slate-300 bg-white text-slate-900 shadow-2xl md:left-4 md:right-auto md:w-full md:max-w-md"
+            className="fixed inset-x-2 bottom-2 top-18 z-20 flex w-auto max-w-none touch-manipulation flex-col overflow-hidden rounded-xl border border-slate-300 bg-white text-slate-900 shadow-2xl md:left-2 md:right-auto md:w-full md:max-w-md"
             role="dialog"
             aria-modal="true"
             aria-labelledby="chat-modal-title"

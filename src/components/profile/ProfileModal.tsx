@@ -20,12 +20,12 @@ export default function ProfileModal({ onClose }: ProfileModalProps) {
     const [savedProfile, setSavedProfile] = useState<ProfileForm>({
         displayName: "User Name",
         email: "user@example.com",
-        bio: "A new member of the Elevator Office.",
+        bio: "A new member of the Elevatorio Office.",
     });
     const [profileForm, setProfileForm] = useState<ProfileForm>({
         displayName: "User Name",
         email: "user@example.com",
-        bio: "A new member of the Elevator Office.",
+        bio: "A new member of the Elevatorio Office.",
     });
 
     // Keep all form updates type-safe and reusable across profile fields.

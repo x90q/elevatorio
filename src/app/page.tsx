@@ -16,7 +16,7 @@ export default function Home() {
           <div className="relative z-10">
             <div className="flex items-center gap-3 text-xs font-bold uppercase tracking-[0.3em] text-emerald-600">
               <span className="size-2 rounded-full bg-emerald-600" />
-              Elevator.
+              Elevatorio.
             </div>
 
             <p className="mt-20 max-w-xl text-[clamp(3.5rem,8vw,7.5rem)] font-black leading-[0.86] tracking-[-0.06em]">
@@ -40,7 +40,7 @@ export default function Home() {
           </div>
 
           <div className="relative z-10 mt-16 flex items-end justify-between border-t border-slate-300 pt-5 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-            <span>Elevator Office / 2026</span>
+            <span>Elevatorio Office / 2026</span>
             <span>Est. 00:00</span>
           </div>
         </section>

@@ -5,6 +5,7 @@ export const floors = [
     { id: "singapore", number: "02", name: "Singapore", status: "Oh wow" },
     { id: "moscow", number: "03", name: "Moscow", status: "Here comes the tanks!" },
     { id: "london", number: "04", name: "London", status: "Really? London?" },
+    { id: "minsk", number: "05", name: "Minsk", status: "Oh bro...." },
 ] as const;
 
 // Infer a union of valid IDs directly from the immutable floor registry.

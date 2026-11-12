@@ -44,7 +44,7 @@ export default function LoginPage() {
             <main className="flex items-center justify-center bg-[linear-gradient(to_right,rgba(15,23,42,0.04)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.04)_1px,transparent_1px)] bg-size-[32px_32px] px-6 py-16 text-slate-950">
                 <section className="w-full max-w-md border border-slate-200 bg-white p-8 shadow-2xl rounded-lg">
                     <Link href="/" className="text-sm font-bold uppercase tracking-[0.25em] text-emerald-600">
-                        Elevator
+                        Elevatorio
                     </Link>
                     <h1 className="mt-8 text-3xl font-bold tracking-tight">Log in</h1>
                     <p className="mt-2 text-sm text-slate-500">Log in to enter the building.</p>
