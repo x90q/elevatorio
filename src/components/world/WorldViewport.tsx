@@ -1,111 +1,88 @@
 "use client";
 
-import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject, MapRoom } from "@/lib/map-types";
+import { CellPosition, CELL_SIZE, GRID_SIZE, WorldGrid } from "@/components/world/WorldGrid";
+import { useWorldCamera } from "@/components/world/useWorldCamera";
 
 /*
- * WORLD VIEWPORT: порядок выполнения после открытия /world
+ * WORLD VIEWPORT — public map lifecycle and rendering pipeline
  *
- * Компонент работает как маленький 2D game engine. API хранит snapshot уровня,
- * React хранит состояние, DOM рисует сетку, а refs и requestAnimationFrame отвечают
- * за быстрые движения камеры и игрока.
+ * This component behaves like a small 2D game client. The API owns the saved map
+ * snapshot, React state describes the visible map, the DOM renders it, and refs plus
+ * requestAnimationFrame handle high-frequency camera and player movement.
  *
- * 1. React вызывает WorldViewport(). Создаются начальные значения: lobby, пустые
- *    blockedCells, placedObjects и rooms, zoom = 1, старт игрока и mapLoadState
- *    = loading. JSX уже описывает сетку, но данных уровня пока нет.
+ * 1. On the first render, React initializes the selected floor, empty collision/object/
+ *    room collections, the player's spawn position, and a loading state. The JSX can
+ *    describe the grid immediately, even though its map data has not arrived yet.
  *
- * 2. useEffect восстановления этажа после mount читает localStorage по
- *    FLOOR_STORAGE_KEY. Если найден допустимый FloorId, setFloorId восстанавливает
- *    его. Затем setIsFloorReady(true) разрешает загрузку. Отложенное чтение нужно,
- *    чтобы localStorage не участвовал в server render и не вызвал hydration mismatch.
+ * 2. After hydration, an effect reads FLOOR_STORAGE_KEY from localStorage. A valid
+ *    FloorId is restored and isFloorReady becomes true. Deferring this browser-only
+ *    read avoids making server-rendered HTML depend on localStorage.
  *
- * 3. useEffect загрузки после isFloorReady запускает refreshMap(). Функция получает
- *    новый mapRequestId и делает GET /api/map?floorId=... с cache: no-store. Сервер
- *    возвращает MapData: blockedCells, placedObjects и rooms.
+ * 3. Once the floor is ready, another effect calls refreshMap(), which sends a
+ *    no-cache GET request to /api/map?floorId=.... The response follows MapData:
+ *    blockedCells, placedObjects, and rooms.
  *
- * 4. refreshMap() проверяет response.ok, isActive и mapRequestId. Это защита от
- *    гонки: старый fetch после смены этажа или размонтирования не может записать
- *    результат поверх нового уровня.
+ * 4. The request checks its active flag and request ID before committing data. This
+ *    prevents a stale response from a previous floor, or a request after unmount,
+ *    from overwriting the current world.
  *
- * 5. JSON.stringify(mapData) создает mapSignatureRef. Неизменившийся snapshot не
- *    перезапускает loading. Новый snapshot записывается через setBlockedCells,
- *    setPlacedObjects и setRooms, после чего mapDataReady означает: данные API готовы.
+ * 5. A serialized snapshot signature detects whether polling returned changed data.
+ *    An identical snapshot leaves the current map and loading state alone; a changed
+ *    snapshot updates React state and marks the API data as ready.
  *
- * 6. React делает commit DOM и строит 60 x 60 = 3,600 кнопок-клеток. Объекты
- *    получают Image, но JSON-ответ еще не означает, что браузер уже создал layout
- *    и декодировал текстуры.
+ * 6. React commits the 60 x 60 grid (3,600 cells). Placed assets become image elements,
+ *    but receiving JSON does not mean the browser has laid out the grid or decoded
+ *    every image yet.
  *
- * 7. checkVisualReady() запускается через requestAnimationFrame после текущего layout
- *    цикла. gridDrawn проверяет реальный размер сетки, imagesDrawn проверяет
- *    image.complete и naturalWidth > 0. Поэтому уровень открывается только после
- *    появления реального DOM, а не сразу после ответа сервера.
+ * 7. checkVisualReady() waits for the next animation frame, verifies the grid has a
+ *    real layout box, and checks that every image loaded or was explicitly marked as
+ *    failed. This distinguishes visual readiness from network readiness.
  *
- * 8. onLoad у Image сообщает об успешной текстуре. onError помечает только одну
- *    картинку как failed и не ломает весь уровень. После всех попыток checkVisualReady
- *    разрешает переход дальше, даже если один asset поврежден.
+ * 8. Image load/error callbacks trigger another readiness check. A broken image is
+ *    marked individually, so one bad asset does not prevent the rest of the map from
+ *    becoming usable.
  *
- * 9. MIN_LOADING_TIME удерживает overlay минимум одну секунду. Затем
- *    setMapLoadState("ready") отключает pointer-events и запускает CSS fade-out.
- *    Ошибка выводится только при mapLoadState = error; ready во время fade-out не
- *    маскируется под ошибку.
+ * 9. MIN_LOADING_TIME prevents a flash of the loading overlay. When both data and
+ *    visuals are ready, mapLoadState becomes "ready" and CSS fades the overlay out;
+ *    while loading or on error, the overlay continues to block map interaction.
  *
- * 10. После загрузки начинается игровая фаза. resetViewport() сбрасывает камеру и
- *     позицию при смене этажа. changeZoom(), handlePointerDown/Move/Up и
- *     animateWheelZoom() обслуживают zoom, drag и pinch. Быстрые transform-изменения
- *     идут через refs и DOM, чтобы React не пересоздавал 3,600 клеток на каждый event.
+ * 10. During exploration, the shared useWorldCamera hook handles wheel zoom, drag,
+ *     pinch, and reset. It updates DOM transforms through refs instead of asking React
+ *     to rebuild the 3,600-cell grid for every pointer or wheel event.
  *
- * 11. movePlayer() обновляет collision snapshot, вызывает findPath(), а findPath()
- *     использует BFS для поиска маршрута по свободным клеткам. Путь анимируется
- *     через playerElementRef и playerTrailRef, а финальная позиция записывается state.
+ * 11. A double-click asks movePlayer() to fetch fresh collision data, validate the
+ *     destination, and call findPath(). Breadth-first search finds a shortest route;
+ *     refs animate the player marker and trail, then React state records the endpoint.
  *
- * 12. Каждые MAP_REFRESH_INTERVAL refreshMap() проверяет сервер снова. Неизменившийся
- *     snapshot остается интерактивным; изменившийся снова проходит pipeline:
- *     API data -> React state -> DOM -> checkVisualReady -> ready.
+ * 12. Polling repeats refreshMap() at MAP_REFRESH_INTERVAL. Unchanged snapshots remain
+ *     interactive; changed snapshots repeat the data-to-React-to-DOM-to-visual-readiness
+ *     pipeline without changing the saved map format.
  */
 
-// Zoom is limited so the map cannot become unusably tiny or fill the whole page.
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 2;
-// The +/- buttons change zoom by 10 percentage points per click.
+// The +/- controls change zoom by ten percentage points per click.
 const ZOOM_STEP = 0.1;
-// Wheel and trackpad use separate sensitivities because their delta values differ.
-const WHEEL_ZOOM_SENSITIVITY = 0.0015;
-const TRACKPAD_ZOOM_SENSITIVITY = 0.012;
-// The map contains 60 rows and 60 columns, so it renders 3,600 cells.
-const GRID_SIZE = 60;
-// Every logical cell occupies a 64 by 64 pixel square before zoom is applied.
-const CELL_SIZE = 64;
-// Ignore tiny pointer movements so a click does not immediately become a drag.
-const DRAG_THRESHOLD = 4;
+// Key used to remember the visitor's last selected floor in this browser.
 const FLOOR_STORAGE_KEY = "elevatorio:selected-floor";
-const DEFAULT_PLAYER_POSITION: CellPosition = { row: 30, column: 30 };
+// Spawn point used when a floor is opened or changed.
+const DEFAULT_PLAYER_POSITION: CellPosition = { x: 30, y: 30 };
 // Keep the loading screen visible long enough to avoid an abrupt first render.
 const MIN_LOADING_TIME = 1000;
 
 // Public users periodically receive map changes saved by the admin.
 const MAP_REFRESH_INTERVAL = 15_000;
 
-type Point = {
-    x: number;
-    y: number;
-};
-
-type CellPosition = {
-    row: number;
-    column: number;
-};
-
 // The public world uses the same camera and grid dimensions as the editor.
 // A cell is walkable only when it is inside the grid and has no collision.
 function isFree(position: CellPosition, blockedCells: Set<string>) {
     return (
-        position.row >= 0 &&
-        position.row < GRID_SIZE &&
-        position.column >= 0 &&
-        position.column < GRID_SIZE &&
-        !blockedCells.has(`${position.row}:${position.column}`)
+        position.x >= 0 &&
+        position.x < GRID_SIZE &&
+        position.y >= 0 &&
+        position.y < GRID_SIZE &&
+        !blockedCells.has(`${position.x}:${position.y}`)
     );
 }
 
@@ -113,16 +90,16 @@ function isFree(position: CellPosition, blockedCells: Set<string>) {
 function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<string>) {
     // These four vectors represent movement to the neighboring cells: up, right, down, left.
     const directions = [
-        { row: -1, column: 0 },
-        { row: 0, column: 1 },
-        { row: 1, column: 0 },
-        { row: 0, column: -1 },
+        { x: 0, y: -1 },
+        { x: 1, y: 0 },
+        { x: 0, y: 1 },
+        { x: -1, y: 0 },
     ];
 
     // BFS checks cells in expanding distance order, which gives the shortest walkable route.
     const queue = [start];
     // visited prevents the same cell from being added to the queue more than once.
-    const visited = new Set([`${start.row}:${start.column}`]);
+    const visited = new Set([`${start.x}:${start.y}`]);
     // previous remembers how we reached each cell so the final route can be rebuilt backwards.
     const previous = new Map<string, CellPosition>();
 
@@ -133,10 +110,10 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
             break;
         }
 
-        if (current.row === target.row && current.column === target.column) {
+        if (current.x === target.x && current.y === target.y) {
             // Reconstruct the route by following predecessors from target back to start.
             const path = [current];
-            let key = `${current.row}:${current.column}`;
+            let key = `${current.x}:${current.y}`;
 
             while (previous.has(key)) {
                 const previousCell = previous.get(key);
@@ -146,7 +123,7 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
                 }
 
                 path.unshift(previousCell);
-                key = `${previousCell.row}:${previousCell.column}`;
+                key = `${previousCell.x}:${previousCell.y}`;
             }
 
             return path;
@@ -154,10 +131,10 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
 
         for (const direction of directions) {
             const next = {
-                row: current.row + direction.row,
-                column: current.column + direction.column,
+                x: current.x + direction.x,
+                y: current.y + direction.y,
             };
-            const nextKey = `${next.row}:${next.column}`;
+            const nextKey = `${next.x}:${next.y}`;
 
             // Only enqueue in-bounds, walkable cells that BFS has not processed yet.
             if (isFree(next, blockedCells) && !visited.has(nextKey)) {
@@ -171,71 +148,43 @@ function findPath(start: CellPosition, target: CellPosition, blockedCells: Set<s
     return [];
 }
 
-function clampZoom(value: number) {
-    // Math.max applies the lower limit first; Math.min then applies the upper limit.
-    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
-}
-
-function pointerDistance(first: Point, second: Point) {
-    // Pythagorean distance: sqrt((x2 - x1)^2 + (y2 - y1)^2).
-    return Math.hypot(second.x - first.x, second.y - first.y);
-}
-
 export default function WorldViewport() {
-    // The public world follows a game-engine pipeline: fetch the level snapshot,
-    // build the grid from that snapshot, wait for visible assets, then unlock input.
-    // Store the saved collision cells and objects received from the admin editor.
-    // floorId determines which independent map snapshot is displayed publicly.
+    // Choose which independent floor snapshot to request from the map API.
     const [floorId, setFloorId] = useState<FloorId>("lobby");
+    // Gate browser storage restoration until after the first client render.
     const [isFloorReady, setIsFloorReady] = useState(false);
+    // Controls loading, interactive, and error overlays independently of map content.
     const [mapLoadState, setMapLoadState] = useState<"loading" | "ready" | "error">("loading");
+    // Collision and visual map data received from the API, keyed by cell coordinates.
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, MapObject>>({});
     const [rooms, setRooms] = useState<Record<string, MapRoom>>({});
-    const [zoom, setZoom] = useState(1);
-    const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
+    // The shared hook owns camera behavior and exposes refs for its DOM layers.
+    const camera = useWorldCamera<HTMLElement>();
+    const { zoom, cameraOffset, viewportRef: viewportElementRef, cameraRef: cameraElementRef, worldRef: gridElementRef } = camera;
+    // Hover is low-volume UI information used by the coordinate and room panels.
     const [hoveredCell, setHoveredCell] = useState<CellPosition | null>(null);
-    // React state is used for stable values that belong to the rendered world.
-    // Fast animation values use refs below so 3,600 cells are not rebuilt every frame.
+    // State is the final rendered player location; refs support immediate animation.
     const [playerPosition, setPlayerPosition] = useState<CellPosition>(DEFAULT_PLAYER_POSITION);
     // The ref changes on every animation step without re-rendering all 3,600 cells.
     const playerPositionRef = useRef(playerPosition);
-    // Stores the pointer-down position and camera offset used as the drag origin.
-    const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
-    // The outer viewport is needed to convert screen coordinates into map-centered coordinates.
-    const viewportElementRef = useRef<HTMLElement>(null);
-    // Camera transform moves the whole map during drag and focal zoom.
-    const cameraElementRef = useRef<HTMLDivElement>(null);
-    // Grid transform changes scale without asking React to render every cell again.
-    const gridElementRef = useRef<HTMLDivElement>(null);
     // Player marker position is changed directly while the walking animation runs.
     const playerElementRef = useRef<HTMLSpanElement>(null);
     // This highlight follows the player marker without rerendering the grid.
     const playerTrailRef = useRef<HTMLSpanElement>(null);
-    // These refs mirror React state so event handlers always use the latest values immediately.
-    const zoomRef = useRef(zoom);
-    const cameraOffsetRef = useRef(cameraOffset);
-    // Pointer Events identifies each finger by pointerId; the map stores the latest point per finger.
-    const activePointers = useRef(new Map<number, Point>());
-    // Snapshot taken when the second finger lands: initial distance, zoom, focal point, and offset.
-    const pinchStart = useRef<{ distance: number; zoom: number; midpoint: Point; cameraX: number; cameraY: number } | null>(null);
-    // Stores the browser animation frame used to smooth desktop wheel/trackpad zoom.
-    const wheelAnimationFrame = useRef<number | null>(null);
-    // Accumulates wheel input while one animation frame sequence is still running.
-    const wheelTargetZoom = useRef(zoom);
-    // The latest cursor point is the focal point for the current wheel zoom.
-    const wheelFocalPoint = useRef<Point | null>(null);
-    // Avoid re-rendering the grid when polling returns an unchanged map snapshot.
+    // Snapshot signature avoids state updates when a polling response is unchanged.
     const mapSignatureRef = useRef("");
     // Prevents a second route from starting while the current route is animating.
     const isMoving = useRef(false);
-    // Tracks the browser frame used to verify that the current grid and its images are visible.
+    // These refs coordinate frame scheduling, loading timers, and request races without rendering.
     const visualCheckFrame = useRef<number | null>(null);
     // Keeps the loading overlay visible for a consistent minimum duration.
     const visualReadyTimer = useRef<number | null>(null);
-    // Separates a successful API response from the later DOM/image rendering check.
+    // Tracks whether the API response is ready, separately from DOM/image readiness.
     const mapDataReady = useRef(false);
+    // Timestamp used to enforce the minimum loading-overlay duration.
     const loadingStartedAt = useRef(0);
+    // Increasing IDs ensure only the latest in-flight map request may commit.
     const mapRequestId = useRef(0);
 
     // Restore the last selected floor only in the browser, after hydration is complete.
@@ -260,22 +209,10 @@ export default function WorldViewport() {
         }
     }, [floorId, isFloorReady]);
 
-    // Reset the camera and player spawn before loading another floor.
+    // Start a floor transition from a predictable camera/player/loading state.
     function resetViewport() {
-        if (wheelAnimationFrame.current !== null) {
-            cancelAnimationFrame(wheelAnimationFrame.current);
-            wheelAnimationFrame.current = null;
-        }
-
-        activePointers.current.clear();
-        pinchStart.current = null;
-        dragStart.current = null;
+        camera.resetCamera();
         isMoving.current = false;
-        zoomRef.current = 1;
-        cameraOffsetRef.current = { x: 0, y: 0 };
-        wheelTargetZoom.current = 1;
-        setZoom(1);
-        setCameraOffset({ x: 0, y: 0 });
         playerPositionRef.current = DEFAULT_PLAYER_POSITION;
         setPlayerPosition(DEFAULT_PLAYER_POSITION);
         setMapLoadState("loading");
@@ -288,7 +225,8 @@ export default function WorldViewport() {
 
     // Rendering readiness is separate from network readiness: the API can return JSON
     // before React has committed the grid and the browser has decoded its textures.
-    function checkVisualReady() {
+    // Verify that React committed the grid and the browser has resolved its images.
+    const checkVisualReady = useCallback(() => {
         if (visualCheckFrame.current !== null) {
             cancelAnimationFrame(visualCheckFrame.current);
         }
@@ -316,11 +254,12 @@ export default function WorldViewport() {
 
             visualCheckFrame.current = null;
         });
-    }
+    }, [gridElementRef]);
 
     // Load the same selected floor map that the admin editor saves in PostgreSQL.
     // Polling only replaces the world when its JSON snapshot changes, so an unchanged
     // level stays interactive instead of restarting its loading screen every 15 seconds.
+    // Fetch the selected floor and poll for admin changes while this page is mounted.
     useEffect(() => {
         if (!isFloorReady) {
             return;
@@ -393,24 +332,25 @@ export default function WorldViewport() {
                 window.clearTimeout(visualReadyTimer.current);
             }
         };
-    }, [floorId, isFloorReady]);
+    }, [checkVisualReady, floorId, isFloorReady]);
 
     // Recheck after React has committed the new grid and its image elements.
     useEffect(() => {
         if (isFloorReady && mapLoadState === "loading") {
             checkVisualReady();
         }
-    }, [floorId, isFloorReady, mapLoadState, placedObjects]);
+    }, [checkVisualReady, floorId, isFloorReady, mapLoadState, placedObjects]);
 
-    // Find the room rectangle under the cursor so public users see its available actions.
-    const hoveredRoom = hoveredCell ? rooms[`${hoveredCell.row}:${hoveredCell.column}`] : undefined;
+    // Resolve the room associated with the currently hovered cell, if any.
+    const hoveredRoom = hoveredCell ? rooms[`${hoveredCell.x}:${hoveredCell.y}`] : undefined;
 
     // Movement is a small gameplay system: refresh collision data, calculate a route,
     // then animate the player through walkable cells without changing the map layout.
-    async function movePlayer(target: CellPosition) {
+    // Validate a destination and animate the player along a shortest walkable route.
+    const movePlayer = useCallback(async (target: CellPosition) => {
         const startPosition = playerPositionRef.current;
 
-        if (isMoving.current || (target.row === startPosition.row && target.column === startPosition.column)) {
+        if (isMoving.current || (target.x === startPosition.x && target.y === startPosition.y)) {
             return;
         }
 
@@ -450,19 +390,19 @@ export default function WorldViewport() {
                 playerPositionRef.current = nextPosition;
                 playerElementRef.current?.style.setProperty(
                     "left",
-                    `${nextPosition.column * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
+                    `${nextPosition.x * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
                 );
                 playerElementRef.current?.style.setProperty(
                     "top",
-                    `${nextPosition.row * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
+                    `${nextPosition.y * CELL_SIZE + CELL_SIZE / 2 - 16}px`,
                 );
                 playerTrailRef.current?.style.setProperty(
                     "left",
-                    `${nextPosition.column * CELL_SIZE}px`,
+                    `${nextPosition.x * CELL_SIZE}px`,
                 );
                 playerTrailRef.current?.style.setProperty(
                     "top",
-                    `${nextPosition.row * CELL_SIZE}px`,
+                    `${nextPosition.y * CELL_SIZE}px`,
                 );
                 await new Promise((resolve) => setTimeout(resolve, 120));
             }
@@ -473,233 +413,30 @@ export default function WorldViewport() {
         } finally {
             isMoving.current = false;
         }
-    }
+    }, [floorId]);
 
-    // The camera is not the world itself: it changes only the transform around the
-    // already-rendered level, which makes zooming and panning cheap.
-    function changeZoom(amount: number, focalPoint?: Point) {
-        const currentZoom = zoomRef.current;
-        const currentOffset = cameraOffsetRef.current;
-        const nextZoom = clampZoom(currentZoom + amount);
+    // Keep hover presentation in the viewport without putting it into the map snapshot.
+    const handleCellHover = useCallback((position: CellPosition | null) => {
+        setHoveredCell(position);
+    }, []);
 
-        if (nextZoom === currentZoom) {
-            return;
-        }
+    // Delegate the cell's double-click to the movement system without blocking the event.
+    const handleCellDoubleClick = useCallback((position: CellPosition) => {
+        void movePlayer(position);
+    }, [movePlayer]);
 
-        let nextOffset = currentOffset;
-
-        if (focalPoint) {
-            // Ratio > 1 means zoom in; ratio < 1 means zoom out.
-            const zoomRatio = nextZoom / currentZoom;
-            // This offset compensates for scaling around the map center instead of the cursor.
-            nextOffset = {
-                x: currentOffset.x + focalPoint.x * (1 - zoomRatio),
-                y: currentOffset.y + focalPoint.y * (1 - zoomRatio),
-            };
-        }
-
-        zoomRef.current = nextZoom;
-        cameraOffsetRef.current = nextOffset;
-        setZoom(nextZoom);
-        setCameraOffset(nextOffset);
-    }
-
-    // Animate wheel zoom outside React so the 3,600-cell grid is not re-rendered per wheel event.
-    function animateWheelZoom(amount: number, focalPoint: Point) {
-        const baseZoom = wheelAnimationFrame.current === null ? zoomRef.current : wheelTargetZoom.current;
-        wheelTargetZoom.current = clampZoom(baseZoom + amount);
-        wheelFocalPoint.current = focalPoint;
-
-        if (wheelAnimationFrame.current !== null) {
-            return;
-        }
-
-        const animate = () => {
-            const currentZoom = zoomRef.current;
-            const targetZoom = wheelTargetZoom.current;
-            // Move only part of the remaining distance each frame for smooth easing.
-            const difference = targetZoom - currentZoom;
-            const nextZoom = Math.abs(difference) < 0.001 ? targetZoom : currentZoom + difference * 0.22;
-            const currentOffset = cameraOffsetRef.current;
-            const activeFocalPoint = wheelFocalPoint.current;
-            // Recalculate the ratio every frame so the cursor point remains visually fixed.
-            const zoomRatio = nextZoom / currentZoom;
-            const nextOffset = activeFocalPoint
-                ? {
-                    x: currentOffset.x + activeFocalPoint.x * (1 - zoomRatio),
-                    y: currentOffset.y + activeFocalPoint.y * (1 - zoomRatio),
-                }
-                : currentOffset;
-
-            zoomRef.current = nextZoom;
-            cameraOffsetRef.current = nextOffset;
-            gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
-            cameraElementRef.current?.style.setProperty(
-                "transform",
-                `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-            );
-
-            if (nextZoom === targetZoom) {
-                wheelAnimationFrame.current = null;
-                setZoom(nextZoom);
-                setCameraOffset(nextOffset);
-                return;
-            }
-
-            wheelAnimationFrame.current = requestAnimationFrame(animate);
-        };
-
-        wheelAnimationFrame.current = requestAnimationFrame(animate);
-    }
-
-    // Use the wheel for zooming instead of allowing the page to scroll.
-    function handleWheel(event: React.WheelEvent<HTMLElement>) {
-        event.preventDefault();
-        const normalizedDelta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-        const sensitivity = event.ctrlKey ? TRACKPAD_ZOOM_SENSITIVITY : WHEEL_ZOOM_SENSITIVITY;
-        const direction = -normalizedDelta * sensitivity;
-        const viewport = event.currentTarget.getBoundingClientRect();
-        const currentOffset = cameraOffsetRef.current;
-        const mapCenter = {
-            x: viewport.left + viewport.width / 2 + currentOffset.x,
-            y: viewport.top + viewport.height / 2 + currentOffset.y,
-        };
-        // Keep the zoom anchored to the cursor instead of the center of the viewport.
-        const focalPoint = {
-            x: event.clientX - mapCenter.x,
-            y: event.clientY - mapCenter.y,
-        };
-
-        animateWheelZoom(direction, focalPoint);
-    }
-
-    // Start tracking a possible camera drag.
-    function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.button !== 0) {
-            return;
-        }
-
-        if (event.pointerType === "touch") {
-            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-            if (activePointers.current.size === 2) {
-                const [first, second] = Array.from(activePointers.current.values());
-                const viewport = viewportElementRef.current?.getBoundingClientRect();
-                // The midpoint between fingers is the point the user expects to stay fixed.
-                const midpoint = {
-                    x: (first.x + second.x) / 2,
-                    y: (first.y + second.y) / 2,
-                };
-                pinchStart.current = {
-                    distance: pointerDistance(first, second),
-                    zoom: zoomRef.current,
-                    midpoint,
-                    cameraX: cameraOffsetRef.current.x,
-                    cameraY: cameraOffsetRef.current.y,
-                };
-                if (viewport) {
-                    // Convert the screen midpoint into coordinates relative to the map center.
-                    pinchStart.current.midpoint = {
-                        x: midpoint.x - (viewport.left + viewport.width / 2 + cameraOffsetRef.current.x),
-                        y: midpoint.y - (viewport.top + viewport.height / 2 + cameraOffsetRef.current.y),
-                    };
-                }
-                dragStart.current = null;
-                event.currentTarget.setPointerCapture(event.pointerId);
-            }
-        }
-
-        dragStart.current = {
-            x: event.clientX,
-            y: event.clientY,
-            cameraX: cameraOffsetRef.current.x,
-            cameraY: cameraOffsetRef.current.y,
-        };
-    }
-
-    // Move the camera only after the pointer passes the drag threshold.
-    function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.pointerType === "touch" && activePointers.current.has(event.pointerId)) {
-            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-            if (pinchStart.current && activePointers.current.size >= 2) {
-                const [first, second] = Array.from(activePointers.current.values());
-                // A distance ratio of 1.2 means the fingers moved 20% apart, so zoom by 1.2x.
-                const nextZoom = clampZoom(pinchStart.current.zoom * (pointerDistance(first, second) / pinchStart.current.distance));
-                // Scaling around the map center requires an offset correction around the focal point.
-                const zoomRatio = nextZoom / pinchStart.current.zoom;
-                const nextOffset = {
-                    x: pinchStart.current.cameraX + pinchStart.current.midpoint.x * (1 - zoomRatio),
-                    y: pinchStart.current.cameraY + pinchStart.current.midpoint.y * (1 - zoomRatio),
-                };
-                zoomRef.current = nextZoom;
-                cameraOffsetRef.current = nextOffset;
-                cameraElementRef.current?.style.setProperty(
-                    "transform",
-                    `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-                );
-                gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
-                return;
-            }
-        }
-
-        if (!dragStart.current) {
-            return;
-        }
-
-        const distanceX = event.clientX - dragStart.current.x;
-        const distanceY = event.clientY - dragStart.current.y;
-
-        if (Math.hypot(distanceX, distanceY) < DRAG_THRESHOLD) {
-            return;
-        }
-
-        if (!dragStart.current || !event.currentTarget.hasPointerCapture(event.pointerId)) {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            event.currentTarget.classList.remove("cursor-grab");
-            event.currentTarget.classList.add("cursor-grabbing");
-        }
-
-        // Move the camera directly in CSS so dragging does not re-render all 3,600 cells.
-        const nextOffset = {
-            x: dragStart.current.cameraX + distanceX,
-            y: dragStart.current.cameraY + distanceY,
-        };
-        cameraOffsetRef.current = nextOffset;
-        cameraElementRef.current?.style.setProperty(
-            "transform",
-            `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-        );
-    }
-
-    // Finish the drag and release pointer capture.
-    function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.pointerType === "touch") {
-            activePointers.current.delete(event.pointerId);
-            if (activePointers.current.size < 2 && pinchStart.current) {
-                pinchStart.current = null;
-                setZoom(zoomRef.current);
-                setCameraOffset(cameraOffsetRef.current);
-            }
-        }
-
-        event.currentTarget.classList.remove("cursor-grabbing");
-        event.currentTarget.classList.add("cursor-grab");
-
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-            event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-
-        dragStart.current = null;
-        // Commit the final drag position to React after the fast pointer updates finish.
-        setCameraOffset(cameraOffsetRef.current);
-    }
+    // Mark one failed asset so it does not hold the visual readiness gate forever.
+    const handleImageError = useCallback((image: HTMLImageElement) => {
+        image.dataset.loadState = "failed";
+        checkVisualReady();
+    }, [checkVisualReady]);
 
     return (
+        // The viewport is the input boundary for camera gestures and map interaction.
         <section
             ref={viewportElementRef}
             className="relative min-h-0 flex-1 touch-none select-none overscroll-none overflow-hidden bg-[#eef1ec]"
-            onWheel={handleWheel}
+            onWheel={camera.handleWheel}
             onDoubleClick={(event) => event.preventDefault()}
         >
             {/* Decorative background grid behind the interactive world map. */}
@@ -729,6 +466,7 @@ export default function WorldViewport() {
                 <p className="mt-1 text-sm text-slate-500">{getFloor(floorId).status}</p>
             </div>
 
+            {/* Camera translation and world scaling use separate nested DOM layers. */}
             <div className="absolute inset-0 overflow-hidden">
                 <div
                     ref={cameraElementRef}
@@ -742,84 +480,38 @@ export default function WorldViewport() {
                 >
                     <div
                         ref={gridElementRef}
-                        className="relative grid touch-manipulation select-none cursor-grab bg-white shadow-xl shadow-slate-300/40"
+                        className="relative touch-manipulation select-none cursor-grab"
                         style={{
                             width: GRID_SIZE * CELL_SIZE,
                             height: GRID_SIZE * CELL_SIZE,
-                            gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)`,
                             transform: `scale(${zoom})`,
                             transformOrigin: "center center",
                             willChange: "transform",
-                            contain: "layout paint",
                         }}
-                        onPointerDown={handlePointerDown}
-                        onPointerMove={handlePointerMove}
-                        onPointerUp={handlePointerUp}
-                        onPointerCancel={handlePointerUp}
+                        onPointerDown={camera.handlePointerDown}
+                        onPointerMove={camera.handlePointerMove}
+                        onPointerUp={camera.handlePointerUp}
+                        onPointerCancel={camera.handlePointerUp}
                     >
-                        {/* Render each saved object inside the cell where it was placed. */}
-                        {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
-                            // Convert each flat render index into a grid coordinate pair.
-                            const row = Math.floor(index / GRID_SIZE);
-                            const column = index % GRID_SIZE;
-                            const isHovered = hoveredCell?.row === row && hoveredCell.column === column;
-                            const isFreeCell = isFree({ row, column }, blockedCells);
-                            const object = placedObjects[`${row}:${column}`];
-
-                            return (
-                                <button
-                                    key={`${row}-${column}`}
-                                    type="button"
-                                    className={`relative size-16 touch-manipulation cursor-default transition-colors focus:outline-none ${object ? "border-0" : "border"} ${isFreeCell ? "border-slate-200" : "border-slate-400 hover:z-10 hover:ring-2 hover:ring-red-500"} ${!isFreeCell
-                                        ? "bg-white"
-                                        : isHovered
-                                            ? "z-10 bg-emerald-300/80 ring-2 ring-emerald-600"
-                                            : "bg-white hover:bg-emerald-100"
-                                        }`}
-                                    aria-label={`Cell ${column + 1}, ${row + 1}`}
-                                    title={isFreeCell ? undefined : "Blocked cell"}
-                                    onMouseEnter={(event) => {
-                                        if (!dragStart.current && event.buttons === 0) {
-                                            setHoveredCell({ row, column });
-                                        }
-                                    }}
-                                    onMouseLeave={(event) => {
-                                        if (event.buttons === 0) {
-                                            setHoveredCell(null);
-                                        }
-                                    }}
-                                    onDoubleClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        void movePlayer({ row, column });
-                                    }}
-                                >
-                                    {object && (
-                                        <Image
-                                            src={object.src}
-                                            alt={object.name}
-                                            width={64}
-                                            height={64}
-                                            unoptimized
-                                            className="pointer-events-none absolute inset-0 size-full object-contain"
-                                            onLoad={checkVisualReady}
-                                            onError={(event) => {
-                                                event.currentTarget.dataset.loadState = "failed";
-                                                checkVisualReady();
-                                            }}
-                                        />
-                                    )}
-                                </button>
-                            );
-                        })}
+                        {/* The shared grid renders map data; player markers are lightweight overlays. */}
+                        <WorldGrid
+                            mode="world"
+                            blockedCells={blockedCells}
+                            placedObjects={placedObjects}
+                            rooms={rooms}
+                            onCellHover={handleCellHover}
+                            onCellDoubleClick={handleCellDoubleClick}
+                            onImageLoad={checkVisualReady}
+                            onImageError={handleImageError}
+                        />
 
                         {/* This lightweight overlay keeps the cell highlight visible while the player moves. */}
                         <span
                             ref={playerTrailRef}
                             className="pointer-events-none absolute z-20 size-16 border-2 border-emerald-300 bg-emerald-100/40 transition-[left,top] duration-100 ease-linear"
                             style={{
-                                left: playerPosition.column * CELL_SIZE,
-                                top: playerPosition.row * CELL_SIZE,
+                                left: playerPosition.x * CELL_SIZE,
+                                top: playerPosition.y * CELL_SIZE,
                             }}
                             aria-hidden="true"
                         />
@@ -828,8 +520,8 @@ export default function WorldViewport() {
                             ref={playerElementRef}
                             className="pointer-events-none absolute z-30 grid size-8 place-items-center rounded-full bg-emerald-600 text-xs font-bold text-white shadow-md transition-[left,top] duration-100 ease-linear"
                             style={{
-                                left: playerPosition.column * CELL_SIZE + CELL_SIZE / 2 - 16,
-                                top: playerPosition.row * CELL_SIZE + CELL_SIZE / 2 - 16,
+                                left: playerPosition.x * CELL_SIZE + CELL_SIZE / 2 - 16,
+                                top: playerPosition.y * CELL_SIZE + CELL_SIZE / 2 - 16,
                             }}
                             aria-hidden="true"
                         >
@@ -872,7 +564,7 @@ export default function WorldViewport() {
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Cursor position</p>
                 <p className="mt-1 font-mono text-sm font-semibold text-slate-700">
                     {hoveredCell
-                        ? `X ${hoveredCell.column + 1} / Y ${hoveredCell.row + 1}`
+                        ? `X ${hoveredCell.x + 1} / Y ${hoveredCell.y + 1}`
                         : "Move over a cell"}
                 </p>
                 {hoveredRoom && (
@@ -888,7 +580,7 @@ export default function WorldViewport() {
                     type="button"
                     className="grid size-10 place-items-center border-b border-slate-200 text-xl text-slate-700 transition hover:bg-emerald-50 hover:text-emerald-700"
                     aria-label="Zoom in"
-                    onClick={() => changeZoom(ZOOM_STEP)}
+                    onClick={() => camera.zoomBy(ZOOM_STEP)}
                 >
                     +
                 </button>
@@ -899,7 +591,7 @@ export default function WorldViewport() {
                     type="button"
                     className="grid size-10 place-items-center border-t border-slate-200 text-xl text-slate-700 transition hover:bg-emerald-50 hover:text-emerald-700"
                     aria-label="Zoom out"
-                    onClick={() => changeZoom(-ZOOM_STEP)}
+                    onClick={() => camera.zoomBy(-ZOOM_STEP)}
                 >
                     -
                 </button>

@@ -41,7 +41,7 @@ Check the container:
 docker compose ps
 ```
 
-Create `.env` in the project root. Minimal local configuration:
+Create `.env` in the project root, or rename `.env.example`. Minimal local configuration:
 
 ```env
 DATABASE_URL=postgresql://elevator_user:elevator_password@localhost:5432/elevator_dev
@@ -63,6 +63,22 @@ Open:
 - editor: [http://localhost:3000/admin](http://localhost:3000/admin)
 
 Do not commit `.env` to Git. It is already ignored by `.gitignore`.
+
+## Create the Better Auth tables
+
+Run this once after the first PosgreSQL start:
+
+MacOS:
+
+```bash
+docker compose -f docker-compose.yml exec -T postgres \ sh -c 'psql -U "elevator_user" -d "elevator_dev"' \ < better-auth_migrations/2026-11-11T12-02-06.616Z.sql >     
+```
+
+Windows:
+
+```bash
+Get-Content -Raw "better-auth_migrations/2026-11-11T12-02-06.616Z.sql" | docker compose -f docker-compose.yml exec -T postgres psql -U "elevator_user" -d "elevator_dev"
+```
 
 ## Create the First Administrator
 

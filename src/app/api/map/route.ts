@@ -68,7 +68,7 @@ export async function GET(request: Request) {
             });
         }
 
-        // PostgreSQL returns JSONB as an object that can be sent directly to the client.
+        // PostgreSQL returns the canonical x:y JSON snapshot directly.
         return NextResponse.json(result.rows[0].map_data);
     } catch (error) {
         console.error("Failed to load world map", error);

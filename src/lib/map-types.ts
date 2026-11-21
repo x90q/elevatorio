@@ -20,7 +20,7 @@ export type MapRoom = {
 export type MapData = {
     // Cell keys with collision enabled for player pathfinding.
     blockedCells: string[];
-    // Objects indexed by their row:column cell key.
+    // Objects indexed by their x:y cell key.
     placedObjects: Record<string, MapObject>;
     // Rooms indexed by their anchor cell for future boundaries and access rules.
     rooms: Record<string, MapRoom>;

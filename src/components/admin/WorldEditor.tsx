@@ -1,120 +1,77 @@
 "use client";
 
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+/*
+ * WORLD EDITOR — admin map editing lifecycle
+ *
+ * The editor is a browser-side tool for changing one floor's map snapshot. Its API
+ * contract is the same MapData used by the public world: collision cells, placed
+ * objects, and room labels. React state is the editable model; WorldGrid renders that
+ * model; useWorldCamera handles camera gestures without rebuilding the grid.
+ *
+ * 1. React initializes the floor, editor tool, empty map collections, room form, and
+ *    loading indicators. Browser localStorage is read only after hydration, then the
+ *    selected floor is loaded with GET /api/map?floorId=....
+ *
+ * 2. A request ID and active flag prevent an older response from replacing the map
+ *    after a floor switch or component unmount. Successful data is copied into React
+ *    state and separately marked as API-ready.
+ *
+ * 3. The grid and object images are rendered from that state. A requestAnimationFrame
+ *    check waits for a real grid layout box and for each image to load or fail. Only
+ *    after this visual readiness check does the loading overlay fade away.
+ *
+ * 4. The selected tool determines what a cell click means: toggle collision, place the
+ *    selected image, paint one cell of a room, or erase all data from that cell. These
+ *    operations update immutable React collections; they do not manually edit cell DOM.
+ *
+ * 5. Uploaded image files are read as data URLs and kept as the selected asset. The
+ *    shared WorldGrid displays the image preview and the same asset can be placed in
+ *    multiple cells.
+ *
+ * 6. Camera wheel, drag, and pinch interactions are delegated to useWorldCamera. A
+ *    camera drag is distinguished from a cell click, and camera-only changes are
+ *    applied to DOM transforms rather than re-rendering all 3,600 cells.
+ *
+ * 7. Save serializes the whole floor snapshot with PUT /api/map?floorId=.... Sets are
+ *    converted to arrays for JSON; objects and rooms are sent as keyed records. The
+ *    saved database format and public-world rendering contract remain unchanged.
+ */
+
+import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { floors, FloorId, getFloor } from "@/lib/floors";
 import { MapData, MapObject, MapRoom } from "@/lib/map-types";
+import { WorldGrid } from "@/components/world/WorldGrid";
+import { useWorldCamera } from "@/components/world/useWorldCamera";
 
-/*
- * WORLD EDITOR: порядок выполнения после открытия /admin
- *
- * Компонент является редактором уровня. Его принцип похож на level editor в игре:
- * получить snapshot этажа, показать его в viewport, изменить модель инструментами,
- * затем сохранить весь snapshot обратно в PostgreSQL. React state является source
- * of truth, DOM является визуализацией, refs нужны для быстрых pointer-операций.
- *
- * 1. React вызывает WorldEditor(). Создаются начальные значения: lobby, пустые
- *    blockedCells, placedObjects и rooms, tool = collision, zoom = 1,
- *    saveState = loading и mapLoadState = loading.
- *
- * 2. useEffect восстановления этажа после mount читает localStorage по
- *    FLOOR_STORAGE_KEY. Если найден допустимый FloorId, setFloorId восстанавливает
- *    его. setIsFloorReady(true) разрешает загрузку и не вызывает hydration mismatch.
- *
- * 3. useEffect загрузки после isFloorReady запускает loadMap(). Функция получает
- *    mapRequestId, переводит редактор в loading и делает GET /api/map?floorId=...
- *    Проверки response.ok, isActive и requestId не дают старому fetch записать
- *    данные после смены этажа или размонтирования компонента.
- *
- * 4. loadMap() записывает ответ в React state. blockedCells превращается из JSON
- *    массива в Set для быстрых collision-проверок, а placedObjects и rooms остаются
- *    объектами с ключом "row:column". После setState React делает commit JSX.
- *
- * 5. checkVisualReady() отделяет network readiness от render readiness. Через
- *    requestAnimationFrame он ждет layout, проверяет размер grid и состояние всех
- *    img. onLoad сообщает об успешной текстуре, onError помечает только сломанный
- *    asset как failed, поэтому одна битая картинка не оставляет весь уровень в loading.
-
- * 6. MIN_LOADING_TIME удерживает overlay минимум одну секунду. После этого
- *    setMapLoadState("ready") убирает блокировку ввода через fade-out. Сообщение
- *    ошибки рендерится только при mapLoadState = error.
-
- * 7. Камера и сетка разделены. cameraElementRef двигает весь уровень через
- *    translate, gridElementRef масштабирует сетку через scale. changeZoom сохраняет
- *    focal point под курсором, а wheel и pinch используют requestAnimationFrame.
- *    Это позволяет двигать viewport плавно, не пересоздавая 3,600 клеток.
-
- * 8. handleCellClick изменяет модель выбранным tool, а не DOM напрямую. collision
- *    переключает клетку в Set стен, object размещает selectedAsset, room записывает
- *    id/name комнаты, erase удаляет все данные клетки. React затем показывает модель.
-
- * 9. handleAssetUpload читает локальный image file через FileReader и превращает его
- *    в data URL. selectedAsset хранит текстуру до размещения, после чего она попадает
- *    в placedObjects и может быть сохранена внутри map_data.
-
- * 10. saveMap() отправляет полный MapData одним PUT. Set стен превращается в массив,
- *     потому что JSON.stringify не сериализует Set. API делает upsert по floorId,
- *     поэтому один этаж восстанавливается как единый детерминированный snapshot.
-
- * 11. При смене этажа select вызывает resetViewport(): камера, zoom и loading
- *     сбрасываются. Cleanup останавливает таймеры и отменяет устаревшие проверки,
- *     после чего новый этаж снова проходит путь:
- *     GET -> React state -> DOM -> assets -> checkVisualReady -> ready.
- */
-
-// Shared editor limits keep the grid and camera behavior predictable.
-// Zoom is limited so the editor remains usable at both extremes.
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 2;
-// The +/- buttons change zoom by 10 percentage points per click.
+// Match the public world's zoom increment for consistent camera controls.
 const ZOOM_STEP = 0.1;
-// Wheel and trackpad use separate sensitivities because their delta values differ.
-const WHEEL_ZOOM_SENSITIVITY = 0.0015;
-const TRACKPAD_ZOOM_SENSITIVITY = 0.012;
-// The editor uses the same 60 by 60 map as the public world.
+// Keep editor grid geometry identical to the shared WorldGrid and camera math.
 const GRID_SIZE = 60;
-// Every logical cell occupies a 64 by 64 pixel square before zoom is applied.
 const CELL_SIZE = 64;
-// Ignore tiny pointer movements so a click does not immediately become a drag.
-const DRAG_THRESHOLD = 4;
+// Remember the admin's floor selection separately from the public user's selection.
 const FLOOR_STORAGE_KEY = "elevatorio:admin-floor";
-// Keep the loading screen visible long enough to avoid an abrupt first render.
+// Avoid a flash of the editor before its saved map is visibly ready.
 const MIN_LOADING_TIME = 1000;
 
+// Each tool maps a cell click to one specific kind of map-model edit.
 type EditorTool = "collision" | "object" | "room" | "erase";
-
+// Reuse the shared API type rather than defining a second object format for the editor.
 type PlacedObject = MapObject;
 
-type Point = {
-    x: number;
-    y: number;
-};
-
-// Use a stable string key so cells can be stored in Sets and JSON objects.
-function cellKey(row: number, column: number) {
-    return `${row}:${column}`;
-}
-
-// Keep zoom controls inside the supported viewport range.
-function clampZoom(value: number) {
-    // Math.max applies the lower limit first; Math.min then applies the upper limit.
-    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
-}
-
-function pointerDistance(first: Point, second: Point) {
-    // Pythagorean distance: sqrt((x2 - x1)^2 + (y2 - y1)^2).
-    return Math.hypot(second.x - first.x, second.y - first.y);
+// Encode x and y in the same stable key format used by the API and WorldGrid.
+function cellKey(x: number, y: number) {
+    return `${x}:${y}`;
 }
 
 export default function WorldEditor() {
-    // The editor is the level-authoring side of the engine: it edits one in-memory
-    // snapshot, previews the result, and persists the complete snapshot to PostgreSQL.
-    // React state contains the editable map and the current viewport controls.
-    // State is the source of truth for edits; refs are only the fast path for camera input.
-    // floorId selects which PostgreSQL JSONB snapshot this editor reads and writes.
+    // The chosen floor determines which saved map snapshot is loaded and edited.
     const [floorId, setFloorId] = useState<FloorId>("lobby");
+    // Prevent browser-only floor restoration from affecting server-rendered markup.
     const [isFloorReady, setIsFloorReady] = useState(false);
+    // Controls the visual loading/error overlay, separate from save feedback.
     const [mapLoadState, setMapLoadState] = useState<"loading" | "ready" | "error">("loading");
+    // Current editing mode, selected image, and room form values.
     const [tool, setTool] = useState<EditorTool>("collision");
     const [blockedCells, setBlockedCells] = useState<Set<string>>(new Set());
     const [placedObjects, setPlacedObjects] = useState<Record<string, PlacedObject>>({});
@@ -122,82 +79,53 @@ export default function WorldEditor() {
     const [selectedAsset, setSelectedAsset] = useState<PlacedObject | null>(null);
     const [roomId, setRoomId] = useState("meeting-room");
     const [roomName, setRoomName] = useState("Meeting room");
+    // Validation errors are shown beside the room form.
     const [roomError, setRoomError] = useState("");
-    const [zoom, setZoom] = useState(1);
-    const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
-    const [hoveredCell, setHoveredCell] = useState<{ row: number; column: number } | null>(null);
-    // saveState controls loading, disabled, success, and error UI around persistence.
+    // Reuse the shared camera engine so public map and editor gestures behave alike.
+    const camera = useWorldCamera<HTMLDivElement>();
+    const { zoom, cameraOffset, viewportRef: viewportElementRef, cameraRef: cameraElementRef, worldRef: gridElementRef } = camera;
+    const { consumeDrag } = camera;
+    // Hovered coordinates are only UI feedback, not part of the persisted map.
+    const [hoveredCell, setHoveredCell] = useState<{ x: number; y: number } | null>(null);
+    // Save state reports whether the snapshot is loading, dirty, saving, or saved.
     const [saveState, setSaveState] = useState<"idle" | "loading" | "saving" | "saved" | "error">("loading");
-    // Stores the pointer-down position and camera offset used as the drag origin.
-    const dragStart = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
-    // The outer viewport converts screen coordinates into map-centered coordinates.
-    const viewportElementRef = useRef<HTMLDivElement>(null);
-    // Camera transform moves the whole map during drag and focal zoom.
-    const cameraElementRef = useRef<HTMLDivElement>(null);
-    // Grid transform changes scale without asking React to render every cell again.
-    const gridElementRef = useRef<HTMLDivElement>(null);
-    // These refs mirror state so pointer handlers use current values without waiting for React.
-    const zoomRef = useRef(zoom);
-    const cameraOffsetRef = useRef(cameraOffset);
-    // Pointer Events identifies each finger by pointerId; store the latest point per finger.
-    const activePointers = useRef(new Map<number, Point>());
-    // Snapshot taken when the second finger lands for focal pinch zoom.
-    const pinchStart = useRef<{ distance: number; zoom: number; midpoint: Point; cameraX: number; cameraY: number } | null>(null);
-    // Stores the browser animation frame used to smooth desktop wheel/trackpad zoom.
-    const wheelAnimationFrame = useRef<number | null>(null);
-    // Accumulates wheel input while one animation frame sequence is still running.
-    const wheelTargetZoom = useRef(zoom);
-    // The latest cursor point is the focal point for the current wheel zoom.
-    const wheelFocalPoint = useRef<Point | null>(null);
-    // Prevent a drag release from triggering an accidental cell edit.
-    const suppressClick = useRef(false);
-    // Tracks the browser frame used to verify that the current grid and its images are visible.
+    // Stable cell callbacks read current tool/form values here without being recreated.
+    const cellActionRef = useRef({ tool, selectedAsset, roomId, roomName });
+    // Refs coordinate browser frames and timers without triggering React renders.
     const visualCheckFrame = useRef<number | null>(null);
-    // Keeps the loading overlay visible for a consistent minimum duration.
     const visualReadyTimer = useRef<number | null>(null);
-    // Separates a successful API response from the later DOM/image rendering check.
     const mapDataReady = useRef(false);
     const loadingStartedAt = useRef(0);
+    // The map request generation guards against stale responses after floor changes.
     const mapRequestId = useRef(0);
 
-    // Restore the last selected editor floor only in the browser, after hydration is complete.
+    // Keep the stable click handler's ref synchronized with the latest controls.
+    useEffect(() => {
+        cellActionRef.current = { tool, selectedAsset, roomId, roomName };
+    }, [roomId, roomName, selectedAsset, tool]);
+
+    // Restore the last admin floor after hydration, then permit the API request.
     useEffect(() => {
         const restoreFloor = window.setTimeout(() => {
             const storedFloor = window.localStorage.getItem(FLOOR_STORAGE_KEY);
-
             if (floors.some((floor) => floor.id === storedFloor)) {
                 setFloorId(storedFloor as FloorId);
             }
-
             setIsFloorReady(true);
         }, 0);
-
         return () => window.clearTimeout(restoreFloor);
     }, []);
 
-    // Keep the selected editor floor across page reloads.
+    // Persist the selected floor in this browser for the next editor visit.
     useEffect(() => {
         if (isFloorReady) {
             window.localStorage.setItem(FLOOR_STORAGE_KEY, floorId);
         }
     }, [floorId, isFloorReady]);
 
-    // Reset the camera before loading another floor.
+    // Reset camera and loading timers before switching the edited floor.
     function resetViewport() {
-        if (wheelAnimationFrame.current !== null) {
-            cancelAnimationFrame(wheelAnimationFrame.current);
-            wheelAnimationFrame.current = null;
-        }
-
-        activePointers.current.clear();
-        pinchStart.current = null;
-        dragStart.current = null;
-        suppressClick.current = false;
-        zoomRef.current = 1;
-        cameraOffsetRef.current = { x: 0, y: 0 };
-        wheelTargetZoom.current = 1;
-        setZoom(1);
-        setCameraOffset({ x: 0, y: 0 });
+        camera.resetCamera();
         setMapLoadState("loading");
         loadingStartedAt.current = performance.now();
         if (visualReadyTimer.current !== null) {
@@ -206,26 +134,20 @@ export default function WorldEditor() {
         }
     }
 
-    // Loading is complete only after both phases finish: the API delivered level data,
-    // and the browser committed the grid plus its image assets to the DOM.
-    function checkVisualReady() {
+    // Unlock the editor only after its grid and image elements are visually resolved.
+    const checkVisualReady = useCallback(() => {
         if (visualCheckFrame.current !== null) {
             cancelAnimationFrame(visualCheckFrame.current);
         }
-
         visualCheckFrame.current = requestAnimationFrame(() => {
             const grid = gridElementRef.current;
             const images = grid ? Array.from(grid.querySelectorAll("img")) : [];
-            // A non-zero layout box confirms that the grid is mounted and visible.
             const gridDrawn = Boolean(grid && grid.getBoundingClientRect().width > 0 && grid.getBoundingClientRect().height > 0);
-            // naturalWidth stays zero when an image has not loaded or failed to decode.
             const imagesDrawn = images.every(
                 (image) => (image.complete && image.naturalWidth > 0) || image.dataset.loadState === "failed",
             );
-
             if (mapDataReady.current && gridDrawn && imagesDrawn) {
                 const remainingTime = Math.max(0, MIN_LOADING_TIME - (performance.now() - loadingStartedAt.current));
-
                 if (visualReadyTimer.current === null) {
                     visualReadyTimer.current = window.setTimeout(() => {
                         setMapLoadState("ready");
@@ -233,22 +155,18 @@ export default function WorldEditor() {
                     }, remainingTime);
                 }
             }
-
             visualCheckFrame.current = null;
         });
-    }
+    }, [gridElementRef]);
 
-    // Load the selected floor map whenever the admin changes floors.
+    // Load the selected floor and invalidate requests/frames when the floor changes.
     useEffect(() => {
         if (!isFloorReady) {
             return;
         }
-
         let isActive = true;
-
         async function loadMap() {
             const requestId = ++mapRequestId.current;
-            // Disable editor interaction until the new floor is loaded and visibly rendered.
             setSaveState("loading");
             setMapLoadState("loading");
             mapDataReady.current = false;
@@ -257,20 +175,15 @@ export default function WorldEditor() {
                 window.clearTimeout(visualReadyTimer.current);
                 visualReadyTimer.current = null;
             }
-
             try {
                 const response = await fetch(`/api/map?floorId=${floorId}`);
-
                 if (!response.ok) {
                     throw new Error("Map loading failed");
                 }
-
                 const mapData: MapData = await response.json();
                 if (!isActive || requestId !== mapRequestId.current) {
                     return;
                 }
-
-                // Rebuild the Set because JSON responses only contain arrays.
                 setBlockedCells(new Set(mapData.blockedCells));
                 setPlacedObjects(mapData.placedObjects);
                 setRooms(mapData.rooms ?? {});
@@ -298,17 +211,18 @@ export default function WorldEditor() {
                 window.clearTimeout(visualReadyTimer.current);
             }
         };
-    }, [floorId, isFloorReady]);
+    }, [checkVisualReady, floorId, isFloorReady]);
 
     // Recheck after React has committed the new grid and its image elements.
     useEffect(() => {
         if (isFloorReady && mapLoadState === "loading") {
             checkVisualReady();
         }
-    }, [floorId, isFloorReady, mapLoadState, placedObjects]);
+    }, [checkVisualReady, floorId, isFloorReady, mapLoadState, placedObjects]);
 
     // Save the whole level snapshot rather than individual clicks. This keeps the
     // database format deterministic and lets one floor be restored as a single unit.
+    // Persist the complete floor snapshot as one deterministic API update.
     async function saveMap() {
         setSaveState("saving");
 
@@ -336,221 +250,34 @@ export default function WorldEditor() {
         }
     }
 
-    // Change zoom and keep the point under the cursor in the same visual position.
-    function changeZoom(amount: number, focalPoint?: Point) {
-        const currentZoom = zoomRef.current;
-        const currentOffset = cameraOffsetRef.current;
-        const nextZoom = clampZoom(currentZoom + amount);
-
-        if (nextZoom === currentZoom) {
-            return;
-        }
-
-        let nextOffset = currentOffset;
-
-        if (focalPoint) {
-            // Adjust the camera offset so the point under the cursor stays fixed during zoom.
-            const zoomRatio = nextZoom / currentZoom;
-            nextOffset = {
-                x: currentOffset.x + focalPoint.x * (1 - zoomRatio),
-                y: currentOffset.y + focalPoint.y * (1 - zoomRatio),
-            };
-        }
-
-        zoomRef.current = nextZoom;
-        cameraOffsetRef.current = nextOffset;
-        setZoom(nextZoom);
-        setCameraOffset(nextOffset);
+    // Keep button-based zoom routed through the shared camera implementation.
+    function changeZoom(amount: number) {
+        camera.zoomBy(amount);
     }
 
     // Animate wheel zoom outside React so the 3,600-cell grid is not re-rendered per wheel event.
-    function animateWheelZoom(amount: number, focalPoint: Point) {
-        const baseZoom = wheelAnimationFrame.current === null ? zoomRef.current : wheelTargetZoom.current;
-        wheelTargetZoom.current = clampZoom(baseZoom + amount);
-        wheelFocalPoint.current = focalPoint;
-
-        if (wheelAnimationFrame.current !== null) {
-            return;
-        }
-
-        const animate = () => {
-            const currentZoom = zoomRef.current;
-            const targetZoom = wheelTargetZoom.current;
-            // Move only part of the remaining distance each frame for smooth easing.
-            const difference = targetZoom - currentZoom;
-            const nextZoom = Math.abs(difference) < 0.001 ? targetZoom : currentZoom + difference * 0.22;
-            const currentOffset = cameraOffsetRef.current;
-            const activeFocalPoint = wheelFocalPoint.current;
-            // Recalculate the ratio every frame so the cursor point remains visually fixed.
-            const zoomRatio = nextZoom / currentZoom;
-            const nextOffset = activeFocalPoint
-                ? {
-                    x: currentOffset.x + activeFocalPoint.x * (1 - zoomRatio),
-                    y: currentOffset.y + activeFocalPoint.y * (1 - zoomRatio),
-                }
-                : currentOffset;
-
-            zoomRef.current = nextZoom;
-            cameraOffsetRef.current = nextOffset;
-            gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
-            cameraElementRef.current?.style.setProperty(
-                "transform",
-                `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-            );
-
-            if (nextZoom === targetZoom) {
-                wheelAnimationFrame.current = null;
-                setZoom(nextZoom);
-                setCameraOffset(nextOffset);
-                return;
-            }
-
-            wheelAnimationFrame.current = requestAnimationFrame(animate);
-        };
-
-        wheelAnimationFrame.current = requestAnimationFrame(animate);
-    }
-
     // Convert mouse-wheel movement into zoom and prevent page scrolling inside the viewport.
     function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
-        event.preventDefault();
-        const normalizedDelta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-        const sensitivity = event.ctrlKey ? TRACKPAD_ZOOM_SENSITIVITY : WHEEL_ZOOM_SENSITIVITY;
-        const direction = -normalizedDelta * sensitivity;
-        const viewport = event.currentTarget.getBoundingClientRect();
-        // Convert the pointer position from viewport coordinates into map-centered coordinates.
-        const focalPoint = {
-            x: event.clientX - (viewport.left + viewport.width / 2 + cameraOffsetRef.current.x),
-            y: event.clientY - (viewport.top + viewport.height / 2 + cameraOffsetRef.current.y),
-        };
-
-        animateWheelZoom(direction, focalPoint);
+        camera.handleWheel(event);
     }
 
     // Remember where a possible drag starts.
     function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.button !== 0) {
-            return;
-        }
-
-        if (event.pointerType === "touch") {
-            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-            if (activePointers.current.size === 2) {
-                const [first, second] = Array.from(activePointers.current.values());
-                const viewport = viewportElementRef.current?.getBoundingClientRect();
-                // The midpoint between fingers is the point the user expects to stay fixed.
-                const midpoint = {
-                    x: (first.x + second.x) / 2,
-                    y: (first.y + second.y) / 2,
-                };
-                pinchStart.current = {
-                    distance: pointerDistance(first, second),
-                    zoom: zoomRef.current,
-                    midpoint,
-                    cameraX: cameraOffsetRef.current.x,
-                    cameraY: cameraOffsetRef.current.y,
-                };
-                if (viewport) {
-                    // Convert the screen midpoint into coordinates relative to the map center.
-                    pinchStart.current.midpoint = {
-                        x: midpoint.x - (viewport.left + viewport.width / 2 + cameraOffsetRef.current.x),
-                        y: midpoint.y - (viewport.top + viewport.height / 2 + cameraOffsetRef.current.y),
-                    };
-                }
-                dragStart.current = null;
-                event.currentTarget.setPointerCapture(event.pointerId);
-            }
-        }
-
-        dragStart.current = {
-            x: event.clientX,
-            y: event.clientY,
-            cameraX: cameraOffsetRef.current.x,
-            cameraY: cameraOffsetRef.current.y,
-        };
-        suppressClick.current = false;
+        camera.handlePointerDown(event);
     }
 
     // Move the camera after the pointer has crossed the drag threshold.
     function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.pointerType === "touch" && activePointers.current.has(event.pointerId)) {
-            activePointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-            if (pinchStart.current && activePointers.current.size >= 2) {
-                const [first, second] = Array.from(activePointers.current.values());
-                // A distance ratio of 1.2 means the fingers moved 20% apart, so zoom by 1.2x.
-                const nextZoom = clampZoom(pinchStart.current.zoom * (pointerDistance(first, second) / pinchStart.current.distance));
-                // Scaling around the map center requires an offset correction around the focal point.
-                const zoomRatio = nextZoom / pinchStart.current.zoom;
-                const nextOffset = {
-                    x: pinchStart.current.cameraX + pinchStart.current.midpoint.x * (1 - zoomRatio),
-                    y: pinchStart.current.cameraY + pinchStart.current.midpoint.y * (1 - zoomRatio),
-                };
-                zoomRef.current = nextZoom;
-                cameraOffsetRef.current = nextOffset;
-                cameraElementRef.current?.style.setProperty(
-                    "transform",
-                    `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-                );
-                gridElementRef.current?.style.setProperty("transform", `scale(${nextZoom})`);
-                return;
-            }
-        }
-
-        if (!dragStart.current) {
-            return;
-        }
-
-        const distanceX = event.clientX - dragStart.current.x;
-        const distanceY = event.clientY - dragStart.current.y;
-
-        if (Math.hypot(distanceX, distanceY) < DRAG_THRESHOLD) {
-            return;
-        }
-
-        if (!suppressClick.current) {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            suppressClick.current = true;
-            event.currentTarget.classList.remove("cursor-grab");
-            event.currentTarget.classList.add("cursor-grabbing");
-        }
-
-        // Move the camera directly in CSS so dragging does not re-render all 3,600 cells.
-        const nextOffset = {
-            x: dragStart.current.cameraX + distanceX,
-            y: dragStart.current.cameraY + distanceY,
-        };
-        cameraOffsetRef.current = nextOffset;
-        cameraElementRef.current?.style.setProperty(
-            "transform",
-            `translate(-50%, -50%) translate(${nextOffset.x}px, ${nextOffset.y}px)`,
-        );
+        camera.handlePointerMove(event);
     }
 
     // Release pointer capture and finish the camera drag.
     function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
-        if (event.pointerType === "touch") {
-            activePointers.current.delete(event.pointerId);
-            if (activePointers.current.size < 2 && pinchStart.current) {
-                pinchStart.current = null;
-                setZoom(zoomRef.current);
-                setCameraOffset(cameraOffsetRef.current);
-            }
-        }
-
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-            event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-
-        dragStart.current = null;
-        event.currentTarget.classList.remove("cursor-grabbing");
-        event.currentTarget.classList.add("cursor-grab");
-        // Commit the final drag position to React after the fast pointer updates finish.
-        setCameraOffset(cameraOffsetRef.current);
+        camera.handlePointerUp(event);
     }
 
     // Read an uploaded image as a data URL so it can be previewed and saved with the map.
+    // Read a validated image file into a browser-safe data URL for preview and saving.
     function handleAssetUpload(event: ChangeEvent<HTMLInputElement>) {
         const file = event.target.files?.[0];
 
@@ -576,13 +303,14 @@ export default function WorldEditor() {
 
     // A tool changes the level model, not the DOM directly. React then re-renders the
     // affected cell from the new model, keeping collision, objects, and rooms consistent.
-    function handleCellClick(row: number, column: number) {
-        if (suppressClick.current) {
-            suppressClick.current = false;
+    // Apply the active editor tool to one logical cell, updating the React map model.
+    const handleCellClick = useCallback((position: { x: number; y: number }) => {
+        if (consumeDrag()) {
             return;
         }
 
-        const key = cellKey(row, column);
+        const { tool, selectedAsset, roomId, roomName } = cellActionRef.current;
+        const key = cellKey(position.x, position.y);
 
         if (tool === "collision") {
             // Use the previous Set to avoid losing edits when React batches rapid clicks.
@@ -655,7 +383,18 @@ export default function WorldEditor() {
             });
             setRoomError("");
         }
-    }
+    }, [consumeDrag]);
+
+    // Update the small cursor-status panel when the pointer enters or leaves a cell.
+    const handleCellHover = useCallback((position: { x: number; y: number } | null) => {
+        setHoveredCell(position);
+    }, []);
+
+    // Treat a failed asset as resolved so one broken image cannot block the editor.
+    const handleImageError = useCallback((image: HTMLImageElement) => {
+        image.dataset.loadState = "failed";
+        checkVisualReady();
+    }, [checkVisualReady]);
 
     // The main viewport is the editor's renderer: the grid shows the current model,
     // while the camera transforms let us inspect it without changing map coordinates.
@@ -663,6 +402,7 @@ export default function WorldEditor() {
         <main className="min-h-dvh bg-[#eef1ec] pt-16 text-slate-950">
             <div className="mx-auto flex min-h-[calc(100dvh-4rem)] max-w-[1600px] flex-col gap-4 p-2 sm:p-4 lg:flex-row">
                 <section className="flex min-h-[70dvh] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl shadow-slate-300/30 lg:min-h-0">
+                    {/* Header summarizes map contents and exposes the whole-map save action. */}
                     <header className="flex flex-col gap-3 border-b border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
                         <div className="min-w-0">
                             <p className="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Admin editor</p>
@@ -683,6 +423,7 @@ export default function WorldEditor() {
                         </div>
                     </header>
 
+                    {/* Main viewport owns pointer gestures, camera layers, grid, and loading overlay. */}
                     <div
                         ref={viewportElementRef}
                         className="relative min-h-0 flex-1 touch-none select-none overscroll-none overflow-hidden bg-[#f7f9f6]"
@@ -696,19 +437,19 @@ export default function WorldEditor() {
                             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Cursor position</p>
                             <p className="mt-1 font-mono text-sm font-semibold text-slate-700">
                                 {hoveredCell
-                                    ? `X ${hoveredCell.column + 1} / Y ${hoveredCell.row + 1}`
+                                    ? `X ${hoveredCell.x + 1} / Y ${hoveredCell.y + 1}`
                                     : "Move over a cell"}
                             </p>
                             {hoveredCell && (
-                                <p className={`mt-1 text-sm font-semibold ${blockedCells.has(cellKey(hoveredCell.row, hoveredCell.column)) ? "text-red-600" : "text-emerald-600"}`}>
-                                    Collision: {blockedCells.has(cellKey(hoveredCell.row, hoveredCell.column)) ? "Yes" : "No"}
+                                <p className={`mt-1 text-sm font-semibold ${blockedCells.has(cellKey(hoveredCell.x, hoveredCell.y)) ? "text-red-600" : "text-emerald-600"}`}>
+                                    Collision: {blockedCells.has(cellKey(hoveredCell.x, hoveredCell.y)) ? "Yes" : "No"}
                                 </p>
                             )}
-                            {hoveredCell && rooms[cellKey(hoveredCell.row, hoveredCell.column)] && (
+                            {hoveredCell && rooms[cellKey(hoveredCell.x, hoveredCell.y)] && (
                                 <p className="mt-1 max-w-48 truncate text-sm font-semibold text-blue-700">
-                                    Room: {rooms[cellKey(hoveredCell.row, hoveredCell.column)].name}
+                                    Room: {rooms[cellKey(hoveredCell.x, hoveredCell.y)].name}
                                     <span className="block text-xs font-medium text-slate-500">
-                                        ID: {rooms[cellKey(hoveredCell.row, hoveredCell.column)].id}
+                                        ID: {rooms[cellKey(hoveredCell.x, hoveredCell.y)].id}
                                     </span>
                                 </p>
                             )}
@@ -726,72 +467,30 @@ export default function WorldEditor() {
                             >
                                 <div
                                     ref={gridElementRef}
-                                    className="grid touch-manipulation select-none cursor-grab border border-slate-300 bg-white shadow-lg"
+                                    className="relative touch-manipulation select-none cursor-grab"
                                     style={{
                                         width: GRID_SIZE * CELL_SIZE,
                                         height: GRID_SIZE * CELL_SIZE,
-                                        gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)`,
                                         transform: `scale(${zoom})`,
                                         transformOrigin: "center center",
                                         willChange: "transform",
-                                        contain: "layout paint",
                                     }}
                                     onPointerDown={handlePointerDown}
                                     onPointerMove={handlePointerMove}
                                     onPointerUp={handlePointerUp}
                                     onPointerCancel={handlePointerUp}
                                 >
-                                    {/* Each button represents one editable map cell. */}
-                                    {/* Derive row and column from the flat array index for each cell. */}
-                                    {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
-                                        const row = Math.floor(index / GRID_SIZE);
-                                        const column = index % GRID_SIZE;
-                                        const key = cellKey(row, column);
-                                        const object = placedObjects[key];
-                                        const isBlocked = blockedCells.has(key);
-                                        const room = rooms[key];
-
-                                        return (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={`relative size-16 text-left transition-colors focus:outline-none ${object ? "border-0" : "border"} ${room ? `${isBlocked ? "bg-red-400/20" : "bg-blue-50/20"} border-blue-400 z-10 ring-2 ring-blue-500` : isBlocked ? "border-red-400 bg-red-400/20 z-10 ring-2 ring-red-500" : "border-slate-200 hover:bg-emerald-50"}`}
-                                                aria-label={`Edit cell ${column + 1}, ${row + 1}`}
-                                                onMouseEnter={(event) => {
-                                                    if (!dragStart.current && event.buttons === 0) {
-                                                        setHoveredCell({ row, column });
-                                                    }
-                                                }}
-                                                onMouseLeave={(event) => {
-                                                    if (event.buttons === 0) {
-                                                        setHoveredCell(null);
-                                                    }
-                                                }}
-                                                onClick={() => handleCellClick(row, column)}
-                                            >
-                                                {object && (
-                                                    <Image
-                                                        src={object.src}
-                                                        alt={object.name}
-                                                        width={64}
-                                                        height={64}
-                                                        unoptimized
-                                                        className="pointer-events-none absolute inset-0 size-full object-contain"
-                                                        onLoad={checkVisualReady}
-                                                        onError={(event) => {
-                                                            event.currentTarget.dataset.loadState = "failed";
-                                                            checkVisualReady();
-                                                        }}
-                                                    />
-                                                )}
-                                                {room && (
-                                                    <span className="pointer-events-none absolute inset-x-1 bottom-1 truncate text-[9px] font-bold text-slate-700">
-                                                        {room.name}
-                                                    </span>
-                                                )}
-                                            </button>
-                                        );
-                                    })}
+                                    {/* Shared rendering keeps editor and public cell geometry identical. */}
+                                    <WorldGrid
+                                        mode="editor"
+                                        blockedCells={blockedCells}
+                                        placedObjects={placedObjects}
+                                        rooms={rooms}
+                                        onCellClick={handleCellClick}
+                                        onCellHover={handleCellHover}
+                                        onImageLoad={checkVisualReady}
+                                        onImageError={handleImageError}
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -846,6 +545,7 @@ export default function WorldEditor() {
                     </div>
                 </section>
 
+                {/* Sidebar controls floor, active tool, room metadata, asset selection, and status. */}
                 <aside className="w-full shrink-0 rounded-xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/30 lg:w-72">
                     {/* The sidebar contains editing tools, asset upload, and save status. */}
                     <p className="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Tools</p>
